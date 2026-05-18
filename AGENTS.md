@@ -14,7 +14,7 @@ RTLS Link firmware work may need to be coordinated with the Axiovel ArduPilot fo
 - The ArduPilot fork has SITL support, which is useful for testing firmware/protocol changes before involving real hardware.
 - If a feature touches both RTLS Link and ArduPilot behavior, inspect both repositories when possible and consider SITL validation as part of the test plan.
 
-Machine-specific local paths for the ArduPilot checkout should not be committed. Keep those in the local-only skill at `.agents/skills/local_context/SKILL.md`, which is ignored by git.
+Machine-specific local paths for the ArduPilot checkout and remote access details should not be committed. Keep those in the local-only skill at `.agents/skills/local_context/SKILL.md`, which is ignored by git. That skill may point to sibling local-only context files, such as remote CI host notes; read those only when the task needs that context.
 
 ## Build System
 
