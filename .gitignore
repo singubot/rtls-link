@@ -6,5 +6,7 @@
 
 tools/rtls-link-cli/target/
 
-AGENTS.md
 GEMINI.md
+
+# Local-only agent context with machine-specific paths.
+.agents/skills/local_context/
