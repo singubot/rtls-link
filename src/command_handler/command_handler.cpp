@@ -463,6 +463,7 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
     const bool knownBinaryCommand =
         commandStartsWith(command, "firmware-info")
         || commandStartsWith(command, "tdoa-distances")
+        || commandStartsWith(command, "tdoa-anchor-stats")
         || commandStartsWith(command, "backup-config")
         || commandStartsWith(command, "list-configs")
         || commandStartsWith(command, "read-config-named")
@@ -522,6 +523,67 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
         outFrame.AppendU16(uwbTdoa2AnchorGetAntennaDelay());
         for (uint8_t i = 0; i < 8; i++) {
             outFrame.AppendU16(distances[i]);
+        }
+        outFrame.Finish();
+        xSemaphoreGive(commandQueueMutex);
+        return true;
+    }
+
+    if (commandStartsWith(command, "tdoa-anchor-stats")) {
+        const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+        if (uwbParams.mode != UWBMode::ANCHOR_TDOA) {
+            appendAck(outFrame, rtls::protocol::StatusCode::InvalidMode, "Not in ANCHOR_TDOA mode");
+            xSemaphoreGive(commandQueueMutex);
+            return true;
+        }
+
+        uwbTdoa2AnchorStats_t stats = {};
+        if (!uwbTdoa2AnchorGetStats(&stats)) {
+            appendAck(outFrame, rtls::protocol::StatusCode::Error, "TDoA anchor algorithm not initialized");
+            xSemaphoreGive(commandQueueMutex);
+            return true;
+        }
+
+        outFrame.Begin(rtls::protocol::FrameType::TdoaAnchorStats);
+        outFrame.AppendU8(stats.version);
+        outFrame.AppendU8(stats.anchorId);
+        outFrame.AppendU8(stats.activeSlots);
+        outFrame.AppendU8(stats.state);
+        outFrame.AppendU8(stats.slotState);
+        outFrame.AppendU8(stats.slot);
+        outFrame.AppendU8(stats.nextSlot);
+        outFrame.AppendBool(stats.txEnabled != 0);
+        outFrame.AppendU16(stats.antennaDelay);
+        outFrame.AppendU32(stats.slotDurationUs);
+        outFrame.AppendU32(stats.frameDurationUs);
+        outFrame.AppendU8(stats.slot0MissStreak);
+        outFrame.AppendU32(stats.slot0Misses);
+        outFrame.AppendU32(stats.syncAcquisitions);
+        outFrame.AppendU32(stats.syncLosses);
+        outFrame.AppendU32(stats.resyncs);
+        outFrame.AppendU32(stats.stallResets);
+        outFrame.AppendU32(stats.txScheduled);
+        outFrame.AppendU32(stats.txDone);
+        uint8_t slotCount = stats.activeSlots;
+        if (slotCount == 0 || slotCount > UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT) {
+            slotCount = UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT;
+        }
+        outFrame.AppendU8(slotCount);
+        for (uint8_t i = 0; i < slotCount; i++) {
+            outFrame.AppendU8(stats.packetIds[i]);
+        }
+        for (uint8_t i = 0; i < slotCount; i++) {
+            outFrame.AppendU16(stats.distances[i]);
+        }
+        for (uint8_t i = 0; i < slotCount; i++) {
+            const uwbTdoa2AnchorSlotStats_t& slot = stats.slots[i];
+            outFrame.AppendU32(slot.goodRx);
+            outFrame.AppendU32(slot.rxTimeout);
+            outFrame.AppendU32(slot.rxFailed);
+            outFrame.AppendU32(slot.unexpectedPacket);
+            outFrame.AppendU32(slot.validDistance);
+            outFrame.AppendU32(slot.invalidDistance);
+            outFrame.AppendU32(slot.packetIdMismatch);
         }
         outFrame.Finish();
         xSemaphoreGive(commandQueueMutex);

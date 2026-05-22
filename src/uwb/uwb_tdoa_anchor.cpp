@@ -122,6 +122,7 @@ void UWBAnchorTDoA::Update()
         LOG_WARN("UWB stall detected (%lu ms without interrupt), reinitializing",
                  (unsigned long)(now - m_lastEventTimeMs));
         dwIdle(&m_Device);
+        uwbTdoa2AnchorRecordStallReset();
         // Full reinit: resets FSM to syncTdmaState and clears stale
         // timestamps so the resync path computes timing from the current
         // DW1000 system clock (not the stale TDMA frame start).
