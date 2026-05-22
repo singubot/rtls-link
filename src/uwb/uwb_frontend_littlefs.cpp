@@ -121,6 +121,12 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
     if (m_Params.mode == UWBMode::TAG_TDOA && isRtlslinkAnchorConfigParam(name)) {
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+        if (m_Params.dynamicAnchorPosEnabled != 0) {
+            LOG_INFO("RTLSLink beacon static anchor config skipped while dynamic anchors are enabled");
+            return result;
+        }
+#endif
         auto anchors = GetAnchors();
         App::ConfigureRtlslinkBeaconAnchors(anchors);
     }

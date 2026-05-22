@@ -95,6 +95,9 @@ struct UWBParams {
     float rotationDegrees;      // Rotation degrees to NED frame
     ZCalcMode zCalcMode;        // Z calculation mode (0=None/TDoA, 1=Rangefinder, 2=UWB-reserved)
     uint8_t rtlsBeaconAgeBiasMs = 2; // Additional TDoA age bias for AP-side UART/scheduler latency
+    float rtlsBeaconTdoaSigmaFloorM = 0.25f; // Minimum TDoA one-sigma error reported to AP_Beacon_RTLSLink
+    uint8_t rtlsBeaconTdoaPhysicalGuardEnable = 1; // 0=disabled, 1=drop physically impossible TDoA samples
+    float rtlsBeaconTdoaPhysicalGuardMarginM = 1.0f; // Extra allowed range-difference beyond anchor baseline
     // Rangefinder forwarding parameters
     uint8_t rfForwardEnable = 0;        // 0=disabled, 1=enabled (forward DISTANCE_SENSOR to ArduPilot)
     uint8_t rfForwardSensorId = 0xFF;   // Sensor ID override (0xFF = preserve source value)

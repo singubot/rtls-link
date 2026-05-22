@@ -104,6 +104,38 @@ static SemaphoreHandle_t measurements_mtx = xSemaphoreCreateMutex();
 static etl::array<UWBAnchorParam, 8> anchor_positions;
 static etl::array<bool, 8> configured_anchor_ids = {};
 
+#if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_RTLSLINK_BEACON_BACKEND)
+static void configureRtlslinkBeaconFromAnchorPositions()
+{
+    etl::array<UWBAnchorParam, 8> dynamic_anchors = {};
+    uint8_t dynamic_anchor_count = 0;
+
+    if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
+        LOG_WARN("RTLSLink beacon dynamic anchor config skipped - mutex busy");
+        return;
+    }
+
+    for (uint8_t id = 0; id < dynamic_anchors.size(); id++) {
+        if (!configured_anchor_ids[id]) {
+            continue;
+        }
+        dynamic_anchors[dynamic_anchor_count++] = anchor_positions[id];
+    }
+
+    xSemaphoreGive(measurements_mtx);
+
+    if (dynamic_anchor_count == 0) {
+        LOG_WARN("RTLSLink beacon dynamic anchor config skipped - no anchors");
+        return;
+    }
+
+    App::ConfigureRtlslinkBeaconAnchors(
+        etl::span<const UWBAnchorParam>(dynamic_anchors.data(), dynamic_anchor_count));
+    LOG_INFO("RTLSLink beacon configured from dynamic anchor positions (%u anchors)",
+             static_cast<unsigned int>(dynamic_anchor_count));
+}
+#endif
+
 // Stale threshold for TDoA pair measurements (350ms — one frame at min TDMA rate).
 static constexpr uint64_t kStaleThresholdUs = 350000;
 
@@ -360,8 +392,22 @@ UWBTagTDoA::UWBTagTDoA(const bsp::UWBConfig& uwb_config, etl::span<const UWBAnch
         configured_anchor_ids[anchorId] = true;
     }
 
+    // Get UWB radio/settings parameters before deciding which anchor geometry to publish.
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+    s_useDynamicPositions = (uwbParams.dynamicAnchorPosEnabled != 0);
+#endif
+
 #ifdef USE_RTLSLINK_BEACON_BACKEND
-    App::ConfigureRtlslinkBeaconAnchors(anchors);
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+    if (s_useDynamicPositions) {
+        LOG_INFO("RTLSLink beacon waiting for dynamic anchor positions");
+    } else
+#endif
+    {
+        App::ConfigureRtlslinkBeaconAnchors(anchors);
+    }
 #endif
 
     // Spi pins already setup on uwb_backend
@@ -386,8 +432,6 @@ UWBTagTDoA::UWBTagTDoA(const bsp::UWBConfig& uwb_config, etl::span<const UWBAnch
     dwNewConfiguration(&m_Device);
     dwSetDefaults(&m_Device);
 
-    // Get UWB radio settings from parameters
-    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
     dw1000_radio::ApplyTdoaRadioParams(&m_Device, uwbParams);
 
     dwSetReceiveWaitTimeout(&m_Device, 10000);
@@ -408,7 +452,6 @@ UWBTagTDoA::UWBTagTDoA(const bsp::UWBConfig& uwb_config, etl::span<const UWBAnch
 
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
     // Initialize dynamic anchor positioning if enabled
-    s_useDynamicPositions = (uwbParams.dynamicAnchorPosEnabled != 0);
     s_dynamicPositionsReadyForEstimator.store(false, std::memory_order_relaxed);
     s_dynamicEstimatorReinitRequested.store(false, std::memory_order_relaxed);
     s_dynamicTransitionHoldoffUntilMs.store(0, std::memory_order_relaxed);
@@ -1173,6 +1216,9 @@ void UWBTagTDoA::maybeUpdateDynamicPositions() {
             s_dynamicPositionsReadyForEstimator.store(true, std::memory_order_relaxed);
             s_dynamicEstimatorReinitRequested.store(true, std::memory_order_relaxed);
             s_dynamicTransitionHoldoffUntilMs.store(now + DYNAMIC_REINIT_HOLDOFF_MS, std::memory_order_relaxed);
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+            configureRtlslinkBeaconFromAnchorPositions();
+#endif
             LOG_INFO("Dynamic anchor positions ready, estimator reinit scheduled");
         }
 
