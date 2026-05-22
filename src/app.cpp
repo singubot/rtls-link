@@ -26,13 +26,20 @@
 #include "mavlink/rangefinder_sensor.hpp"
 #endif
 
-#ifdef USE_BEACON_PROTOCOL
-#include "bcn_konex/beacon_protocool.hpp"
-#endif
-
-#ifdef USE_MAVLINK
+#if defined(USE_MAVLINK) && defined(USE_RTLSLINK_BEACON_BACKEND)
 App::App()
-  : uart_comm_(App::GetArdupilotSerial()), local_position_sensor_(uart_comm_, kSystemId, kComponentId)
+  : uart_comm_(App::GetArdupilotSerial())
+  , local_position_sensor_(uart_comm_, kSystemId, kComponentId)
+  , rtlslink_beacon_backend_(App::GetArdupilotSerial())
+{}
+#elif defined(USE_MAVLINK)
+App::App()
+  : uart_comm_(App::GetArdupilotSerial())
+  , local_position_sensor_(uart_comm_, kSystemId, kComponentId)
+{}
+#elif defined(USE_RTLSLINK_BEACON_BACKEND)
+App::App()
+  : rtlslink_beacon_backend_(App::GetArdupilotSerial())
 {}
 #else
 App::App()
@@ -45,13 +52,16 @@ void App::Init()
 {
   LOG_INFO("------ Initializing the application ------");
 
-#ifdef USE_BEACON_PROTOCOL
-  bcn_konex::BeaconProtocol::Init();
+#if defined(USE_MAVLINK) || defined(USE_RTLSLINK_BEACON_BACKEND)
+  Serial1.setTxBufferSize(kArdupilotSerialTxBufferSize);
+  Serial1.begin(kArdupilotSerialBaudrate, SERIAL_8N1, bsp::kBoardConfig.uwb_data_uart.rx_pin, bsp::kBoardConfig.uwb_data_uart.tx_pin);
+#endif
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+  rtlslink_beacon_backend_.Init(kArdupilotSerialBaudrate, kArdupilotSerialTxBufferSize);
 #endif
 
 #ifdef USE_MAVLINK
-  Serial1.begin(921600, SERIAL_8N1, bsp::kBoardConfig.uwb_data_uart.rx_pin, bsp::kBoardConfig.uwb_data_uart.tx_pin);
-
 #ifdef USE_MAVLINK_HEARTBEAT
   local_position_sensor_.set_heartbeat_callback([this](uint8_t system_id, uint8_t component_id) {
     (void)component_id;
@@ -64,8 +74,10 @@ void App::Init()
   // Initialize timestamp
   device_unhealthy_timestamp_ms_ = millis();
 
+#ifdef USE_RATE_STATISTICS
   // Initialize mutex for rate statistics thread safety
   rate_stats_mutex_ = xSemaphoreCreateMutex();
+#endif
 
 #if defined(USE_STATUS_LED_TASK) && defined(BOARD_HAS_LED)
   LOG_INFO("Status task enabled");
@@ -98,7 +110,7 @@ void App::Init()
 
             // Forward to ArduPilot if enabled
             const auto& params = Front::uwbLittleFSFront.GetParams();
-            if (params.rfForwardEnable) {
+            if (params.rfForwardEnable && IsMavlinkOutputSelected()) {
                 bool success = local_position_sensor_.send_distance_sensor(
                     distance_msg,
                     params.rfForwardSensorId,
@@ -140,7 +152,28 @@ void App::Init()
 
 void App::Update()
 {
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+  if (IsRtlslinkBeaconOutputSelected()) {
+    rtlslink_beacon_backend_.Update();
+  }
+#endif
+
 #ifdef USE_MAVLINK
+  const bool mavlink_output_selected = IsMavlinkOutputSelected();
+  uint64_t now_ms = millis();
+
+#ifdef HAS_RANGEFINDER
+  // Keep rangefinder state fresh even when RTLSLink Beacon is the selected
+  // output; SendSample may still use it for zCalcMode=RANGEFINDER.
+  if (rangefinder_sensor_) {
+    rangefinder_sensor_->process_received_bytes();
+  }
+#endif
+
+  if (!mavlink_output_selected) {
+    return;
+  }
+
   // App health stats (static to persist across calls)
   static uint32_t app_stats_healthy_cycles = 0;
   static uint32_t app_stats_unhealthy_cycles = 0;
@@ -149,7 +182,6 @@ void App::Update()
 
   uint8_t buffer[1024];
   uint32_t buffer_index = 0;
-  uint64_t now_ms = millis();
 
   // ********** SENDING **********
 
@@ -253,11 +285,6 @@ void App::Update()
   // ********** RECEIVING **********
 
 #ifdef HAS_RANGEFINDER
-  // Process rangefinder MAVLink messages
-  if (rangefinder_sensor_) {
-    rangefinder_sensor_->process_received_bytes();
-  }
-
   // UWB-dropout rangefinder fallback: when UWB stops producing samples (so
   // SendSample's vision_position_estimate path no longer carries the height)
   // but the rangefinder is still healthy, auto-forward the cached
@@ -302,21 +329,7 @@ void App::Update()
   local_position_sensor_.process_received_bytes(buffer, buffer_index);
 
 #endif // USE_MAVLINK
-
-#ifdef USE_BEACON_PROTOCOL
-  AddAnchorEcho();
-#endif
 }
-
-#ifdef USE_BEACON_PROTOCOL
-/**
- *  @brief Run the application task for beacon protocol
- */
-void App::AddAnchorEcho()
-{
-  bcn_konex::BeaconProtocol::SendAddAnchorEcho();
-}
-#endif
 
 #if defined(USE_STATUS_LED_TASK) && defined(BOARD_HAS_LED)
 void App::StatusLedTask()
@@ -665,12 +678,6 @@ static std::array<float, VISION_POSITION_COVARIANCE_SIZE> mapToMAVLinkCovariance
 void App::SendSample(float x_m, float y_m, float z_m,
                      std::optional<std::array<float, 6>> positionCovariance)
 {
-#ifdef USE_BEACON_PROTOCOL
-  // Beacon protocol doesn't use covariance
-  bcn_konex::BeaconProtocol::SendSample(x_m, y_m, z_m, 0);
-#endif
-
-#if defined(USE_MAVLINK) && defined(USE_MAVLINK_POSITION)
   // Determine Z coordinate based on zCalcMode parameter
   ZCalcMode mode = Front::uwbLittleFSFront.GetParams().zCalcMode;
   float final_z;
@@ -687,6 +694,22 @@ void App::SendSample(float x_m, float y_m, float z_m,
 
   // Apply coordinate system rotation to correct for beacon system orientation
   Vector3f rotated_vector = correct_for_orient_yaw(x_m, y_m, final_z);
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+  if (IsRtlslinkBeaconOutputSelected()) {
+    app.rtlslink_beacon_backend_.SendPosition(rotated_vector.x, rotated_vector.y, rotated_vector.z);
+    app.last_sample_timestamp_ms_ = millis();
+#ifdef USE_RATE_STATISTICS
+    app.RecordSampleTimestamp();
+#endif
+    return;
+  }
+#endif
+
+#if defined(USE_MAVLINK) && defined(USE_MAVLINK_POSITION)
+  if (!IsMavlinkOutputSelected()) {
+    return;
+  }
 
   // Check if we have received a heartbeat recently
 #ifdef USE_MAVLINK_HEARTBEAT
@@ -730,14 +753,59 @@ void App::SendSample(float x_m, float y_m, float z_m,
 }
 #endif // HAS_POSITION_OUTPUT
 
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+void App::ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam> anchors)
+{
+  app.rtlslink_beacon_backend_.ConfigureAnchors(anchors, Front::uwbLittleFSFront.GetParams().rotationDegrees);
+}
+
+void App::SendTdoaMeasurement(uint8_t anchor_a,
+                              uint8_t anchor_b,
+                              float distance_diff_m,
+                              float sigma_m,
+                              uint64_t solved_timestamp_us)
+{
+  if (!IsRtlslinkBeaconOutputSelected()) {
+    return;
+  }
+  app.rtlslink_beacon_backend_.EnqueueTdoa(anchor_a, anchor_b, distance_diff_m, sigma_m, solved_timestamp_us);
+}
+#endif
+
 void App::Start()
 {
   // For now the start will do nothing
 }
 
-#ifdef USE_MAVLINK
+#if defined(USE_MAVLINK) || defined(USE_RTLSLINK_BEACON_BACKEND)
 HardwareSerial& App::GetArdupilotSerial()
 {
     return Serial1;
 }
 #endif
+
+bool App::IsMavlinkOutputSelected()
+{
+#ifdef USE_MAVLINK
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+  return Front::uwbLittleFSFront.GetParams().outputBackend == OutputBackend::MAVLINK;
+#else
+  return true;
+#endif
+#else
+  return false;
+#endif
+}
+
+bool App::IsRtlslinkBeaconOutputSelected()
+{
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+#ifdef USE_MAVLINK
+  return Front::uwbLittleFSFront.GetParams().outputBackend == OutputBackend::RTLSLINK_BEACON;
+#else
+  return true;
+#endif
+#else
+  return false;
+#endif
+}

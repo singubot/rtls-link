@@ -9,13 +9,19 @@
 
 #include "front.hpp"
 #include "scheduler.hpp"
+#include "uwb/uwb_params.hpp"
 
 #ifdef USE_MAVLINK
 #include "mavlink/local_position_sensor.hpp"
 #include "mavlink/uart_comm.hpp"
 #endif
 
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+#include "beacon/rtlslink_beacon_backend.hpp"
+#endif
+
 #include <etl/delegate.h>
+#include <etl/span.h>
 #include <cmath> // For sin and cos functions
 #include <optional>
 #include <array>
@@ -42,25 +48,29 @@ public:
 
     void Update();
 
-#ifdef USE_BEACON_PROTOCOL
-    // Should be called periodically for beacon protocol
-    void AddAnchorEcho();
-#endif
-
 #if defined(USE_STATUS_LED_TASK) && defined(BOARD_HAS_LED)
     // Task that blinks LED based on current status. Called at 5Hz rate
     void StatusLedTask();
 #endif
-    
+
 #ifdef HAS_POSITION_OUTPUT
     static void SendSample(float x_m, float y_m, float z_m,
                            std::optional<std::array<float, 6>> positionCovariance = std::nullopt);
 #endif
 
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    static void ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam> anchors);
+    static void SendTdoaMeasurement(uint8_t anchor_a,
+                                    uint8_t anchor_b,
+                                    float distance_diff_m,
+                                    float sigma_m,
+                                    uint64_t solved_timestamp_us);
+#endif
+
     static void Start();
     static void Stop();
 
-#ifdef USE_MAVLINK
+#if defined(USE_MAVLINK) || defined(USE_RTLSLINK_BEACON_BACKEND)
     static HardwareSerial& GetArdupilotSerial();
 #endif
     static App& GetInstance();
@@ -111,6 +121,10 @@ private:
 #endif // USE_MAVLINK_ORIGIN
 #endif // USE_MAVLINK
 
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    RTLSLinkBeaconBackend rtlslink_beacon_backend_;
+#endif
+
     uint64_t last_sample_timestamp_ms_ = 0;
     uint64_t device_unhealthy_timestamp_ms_ = 0;
 
@@ -154,7 +168,11 @@ private:
 #endif
 
 private:
-    static constexpr uint64_t kDeviceHealtyMinDurationMs = 100;     // If no packet sent for more than 100ms, consider device as unhealthy
+    // App::Update runs at 10 Hz, so a 100 ms freshness window races normal
+    // scheduler jitter and can keep the 16 s origin timer from ever maturing.
+    static constexpr uint64_t kDeviceHealtyMinDurationMs = 500;
+    static constexpr uint32_t kArdupilotSerialBaudrate = 921600;
+    static constexpr size_t kArdupilotSerialTxBufferSize = 1024;
 
 #ifdef USE_MAVLINK
     static constexpr uint8_t kSystemId = 199;
@@ -176,6 +194,9 @@ private:
     static constexpr uint32_t kRfForwardFailLogThreshold = 10;   // Log after this many consecutive failures
     static constexpr uint64_t kUwbDropoutForwardMs = 500;        // UWB silent for this long → start forwarding rangefinder ourselves
 #endif
+
+    static bool IsMavlinkOutputSelected();
+    static bool IsRtlslinkBeaconOutputSelected();
 };
 
 extern App app;

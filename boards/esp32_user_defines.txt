@@ -27,7 +27,6 @@
 ; -----------------------------------------------------------------------------
 ; MAVLINK OUTPUT PROTOCOL
 ; Used for communication with ArduPilot/PX4 flight controllers
-; NOTE: Mutually exclusive with USE_BEACON_PROTOCOL
 ; -----------------------------------------------------------------------------
 -D USE_MAVLINK
 -D USE_MAVLINK_POSITION         ; VISION_POSITION_ESTIMATE messages
@@ -37,10 +36,10 @@
 ; -D USE_MAVLINK_RANGEFINDER    ; NOT SUPPORTED: ESP32S3 only (no rangefinder hardware)
 
 ; -----------------------------------------------------------------------------
-; ALTERNATIVE: BEACON PROTOCOL (Konex proprietary)
-; NOTE: Mutually exclusive with USE_MAVLINK - uncomment only one
+; RTLSLINK BEACON BACKEND
+; ArduPilot AP_Beacon_RTLSLink serial backend (runtime-selected by uwb.outputBackend)
 ; -----------------------------------------------------------------------------
-; -D USE_BEACON_PROTOCOL
+-D USE_RTLSLINK_BEACON_BACKEND
 
 ; -----------------------------------------------------------------------------
 ; UWB OPERATIONAL MODES

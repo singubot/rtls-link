@@ -4,12 +4,36 @@
 #include "logging/logging.hpp"
 #include <cstring>
 
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+#include "app.hpp"
+#endif
+
 #ifdef USE_UWB_MODE_TDOA_TAG
 #include "uwb_tdoa_tag.hpp"
 #endif
 
 #ifdef USE_UWB_MODE_TDOA_ANCHOR
 #include "uwb_tdoa_anchor.hpp"
+#endif
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+namespace {
+
+bool isRtlslinkAnchorConfigParam(const char* name)
+{
+    if (strcmp(name, "outputBackend") == 0 || strcmp(name, "rotationDegrees") == 0 || strcmp(name, "anchorCount") == 0) {
+        return true;
+    }
+    if (name[0] == 'x' || name[0] == 'y' || name[0] == 'z') {
+        return name[1] >= '1' && name[1] <= '6' && name[2] == '\0';
+    }
+    if (strncmp(name, "devId", 5) == 0) {
+        return name[5] >= '1' && name[5] <= '6' && name[6] == '\0';
+    }
+    return false;
+}
+
+} // namespace
 #endif
 
 void UWBLittleFSFrontend::InitBackendForCurrentMode() {
@@ -92,6 +116,19 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
 #if defined(USE_UWB_MODE_TDOA_TAG) && defined(ESP32S3_UWB_BOARD)
     if (strcmp(name, "tdoaMatcherPolicy") == 0 && m_Params.mode == UWBMode::TAG_TDOA) {
         UWBTagTDoA::ApplyMatcherPolicy(m_Params.tdoaMatcherPolicy);
+    }
+#endif
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    if (m_Params.mode == UWBMode::TAG_TDOA && isRtlslinkAnchorConfigParam(name)) {
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+        if (m_Params.dynamicAnchorPosEnabled != 0) {
+            LOG_INFO("RTLSLink beacon static anchor config skipped while dynamic anchors are enabled");
+            return result;
+        }
+#endif
+        auto anchors = GetAnchors();
+        App::ConfigureRtlslinkBeaconAnchors(anchors);
     }
 #endif
 

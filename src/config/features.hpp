@@ -24,7 +24,7 @@
 
 #if !defined(USE_WIFI) && \
     !defined(USE_MAVLINK) && \
-    !defined(USE_BEACON_PROTOCOL) && \
+    !defined(USE_RTLSLINK_BEACON_BACKEND) && \
     !defined(USE_CONSOLE) && \
     !defined(USE_UWB_MODE_TDOA_ANCHOR) && \
     !defined(USE_UWB_MODE_TDOA_TAG) && \
@@ -52,6 +52,7 @@
 #define USE_MAVLINK_HEARTBEAT
 #define USE_MAVLINK_ORIGIN
 #define USE_MAVLINK_COVARIANCE
+#define USE_RTLSLINK_BEACON_BACKEND
 
 // Note: Rangefinder is board-specific, enabled below based on board
 // #define USE_MAVLINK_RANGEFINDER
@@ -148,7 +149,7 @@
 #endif
 
 // Position output available (needed by tags)?
-#if defined(USE_MAVLINK) || defined(USE_BEACON_PROTOCOL)
+#if defined(USE_MAVLINK) || defined(USE_RTLSLINK_BEACON_BACKEND)
     #define HAS_POSITION_OUTPUT 1
 #endif
 

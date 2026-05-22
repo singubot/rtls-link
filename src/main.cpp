@@ -13,10 +13,6 @@
 #include "wifi/wifi_frontend_littlefs.hpp"
 #endif
 
-#ifdef USE_BEACON_PROTOCOL
-#include "bcn_konex/beacon_protocool.hpp"
-#endif
-
 #ifdef USE_CONSOLE
 #include "console/console.hpp"
 #include "command_handler/command_handler.hpp"

@@ -62,6 +62,7 @@ struct ParamDef {
 enum class UWBMode : uint8_t;
 enum class WifiMode : uint8_t;
 enum class ZCalcMode : uint8_t;
+enum class OutputBackend : uint8_t;
 
 using uint32_t_type = etl::type_id_pair<uint32_t, static_cast<size_t>(ParamType::UINT32)>;
 using uint16_t_type = etl::type_id_pair<uint16_t, static_cast<size_t>(ParamType::UINT16)>;
@@ -76,6 +77,7 @@ using bool_type = etl::type_id_pair<bool, static_cast<size_t>(ParamType::BOOL)>;
 using wifimode_type = etl::type_id_pair<WifiMode, static_cast<size_t>(ParamType::ENUM)>;
 using uwbmode_type = etl::type_id_pair<UWBMode, static_cast<size_t>(ParamType::ENUM)>;
 using zcalcmode_type = etl::type_id_pair<ZCalcMode, static_cast<size_t>(ParamType::ENUM)>;
+using outputbackend_type = etl::type_id_pair<OutputBackend, static_cast<size_t>(ParamType::ENUM)>;
 
 template <size_t size>
 using string_type = etl::type_id_pair<etl::array<char, size>, static_cast<size_t>(ParamType::STRING)>;
@@ -85,12 +87,12 @@ using TypeIdLookup = etl::type_id_lookup<
                         uint8_t_type, uint16_t_type, uint32_t_type,
                         int8_t_type, int16_t_type, int32_t_type,
                         float_type, double_type, string_type<size>,
-                        bool_type, wifimode_type, uwbmode_type, zcalcmode_type>;
+                        bool_type, wifimode_type, uwbmode_type, zcalcmode_type,
+                        outputbackend_type>;
 
 /**
  * @brief Parameter construction at compile-time.
  * 
  */
 #define PARAM_DEF(structure, attrib) ParamDef{offsetof(structure, attrib), sizeof(structure::attrib), static_cast<ParamType>(TypeIdLookup<sizeof(structure::attrib)>::id_from_type_v<decltype(structure::attrib)>), #attrib}
-
 

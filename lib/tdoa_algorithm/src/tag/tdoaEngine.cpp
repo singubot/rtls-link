@@ -45,8 +45,20 @@ The implementation must handle
 
 #include <string.h>
 #include <stdio.h>
+#if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+#include <esp_timer.h>
+#endif
 
 #define DEBUG_MODULE "TDOA_ENGINE"
+
+static uint64_t getTdoaSolvedTimestampUs()
+{
+#if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+  return static_cast<uint64_t>(esp_timer_get_time());
+#else
+  return 0;
+#endif
+}
 
 #include "tdoaEngine.h"
 #include "tdoaStats.h"
@@ -68,7 +80,8 @@ static void enqueueTDOA(const tdoaAnchorContext_t* anchorACtx, const tdoaAnchorC
 
   tdoaMeasurement_t tdoa = {
     .distanceDiff = static_cast<float>(distanceDiff),
-    .stdDev = TDOA_ENGINE_MEASUREMENT_NOISE_STD
+    .stdDev = TDOA_ENGINE_MEASUREMENT_NOISE_STD,
+    .solvedTimestampUs = getTdoaSolvedTimestampUs()
   };
 
   // *** Added by me ***

@@ -4,6 +4,7 @@
 
 #include <etl/array.h>
 
+#include "config/features.hpp"
 #include "utils/utils.hpp"
 
 enum class UWBMode : uint8_t {
@@ -16,6 +17,11 @@ enum class ZCalcMode : uint8_t {
     NONE = 0,        // Use Z from UWB TDoA estimator (default)
     RANGEFINDER = 1, // Use Z from MAVLink DISTANCE_SENSOR
     UWB = 2          // Reserved for future UWB-based Z calculation
+};
+
+enum class OutputBackend : uint8_t {
+    MAVLINK = 0,          // Current/default ArduPilot integration path
+    RTLSLINK_BEACON = 1   // ArduPilot AP_Beacon_RTLSLink serial backend
 };
 
 // Anchor layout configurations for dynamic position calculation
@@ -77,8 +83,21 @@ struct UWBParams {
     double originLon;           // Origin Longitude
     float originAlt;            // Origin Altitude
     uint8_t mavlinkTargetSystemId; // MAVLink Target System ID
+    // Runtime output transport. Keep MAVLink as the default when it is compiled,
+    // otherwise select the compiled RTLSLink beacon backend.
+#ifdef USE_MAVLINK
+    OutputBackend outputBackend = OutputBackend::MAVLINK;
+#elif defined(USE_RTLSLINK_BEACON_BACKEND)
+    OutputBackend outputBackend = OutputBackend::RTLSLINK_BEACON;
+#else
+    OutputBackend outputBackend = OutputBackend::MAVLINK;
+#endif
     float rotationDegrees;      // Rotation degrees to NED frame
     ZCalcMode zCalcMode;        // Z calculation mode (0=None/TDoA, 1=Rangefinder, 2=UWB-reserved)
+    uint8_t rtlsBeaconAgeBiasMs = 2; // Additional TDoA age bias for AP-side UART/scheduler latency
+    float rtlsBeaconTdoaSigmaFloorM = 0.25f; // Minimum TDoA one-sigma error reported to AP_Beacon_RTLSLink
+    uint8_t rtlsBeaconTdoaPhysicalGuardEnable = 1; // 0=disabled, 1=drop physically impossible TDoA samples
+    float rtlsBeaconTdoaPhysicalGuardMarginM = 1.0f; // Extra allowed range-difference beyond anchor baseline
     // Rangefinder forwarding parameters
     uint8_t rfForwardEnable = 0;        // 0=disabled, 1=enabled (forward DISTANCE_SENSOR to ArduPilot)
     uint8_t rfForwardSensorId = 0xFF;   // Sensor ID override (0xFF = preserve source value)

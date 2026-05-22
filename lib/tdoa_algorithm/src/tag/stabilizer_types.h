@@ -106,6 +106,7 @@ typedef struct tdoaMeasurement_s {
 
   float distanceDiff;
   float stdDev;
+  uint64_t solvedTimestampUs;
 } 
 tdoaMeasurement_t;
 

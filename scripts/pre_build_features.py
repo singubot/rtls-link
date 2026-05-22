@@ -138,10 +138,6 @@ def validate_features(flags, board_define=None):
     errors = []
     warnings = []
 
-    # === MUTUAL EXCLUSION ===
-    if 'USE_MAVLINK' in flag_set and 'USE_BEACON_PROTOCOL' in flag_set:
-        errors.append("USE_MAVLINK and USE_BEACON_PROTOCOL are mutually exclusive")
-
     # === WIFI DEPENDENCIES ===
     wifi_features = [
         'USE_WIFI_WEBSERVER',
@@ -166,6 +162,10 @@ def validate_features(flags, board_define=None):
         if feat in flag_set and 'USE_MAVLINK' not in flag_set:
             errors.append(f"{feat} requires USE_MAVLINK")
 
+    # === RTLSLINK BEACON DEPENDENCIES ===
+    if 'USE_RTLSLINK_BEACON_BACKEND' in flag_set and 'USE_UWB_MODE_TDOA_TAG' not in flag_set:
+        errors.append("USE_RTLSLINK_BEACON_BACKEND requires USE_UWB_MODE_TDOA_TAG")
+
     # === CONSOLE DEPENDENCIES ===
     console_features = [
         'USE_CONSOLE_PARAM_RW',
@@ -185,10 +185,10 @@ def validate_features(flags, board_define=None):
     # === TAG MODE REQUIRES OUTPUT ===
     tag_modes = ['USE_UWB_MODE_TDOA_TAG']
     has_tag_mode = any(m in flag_set for m in tag_modes)
-    has_output = 'USE_MAVLINK' in flag_set or 'USE_BEACON_PROTOCOL' in flag_set
+    has_output = 'USE_MAVLINK' in flag_set or 'USE_RTLSLINK_BEACON_BACKEND' in flag_set
 
     if has_tag_mode and not has_output:
-        errors.append("Tag modes require USE_MAVLINK or USE_BEACON_PROTOCOL for position output")
+        errors.append("Tag modes require USE_MAVLINK or USE_RTLSLINK_BEACON_BACKEND for position output")
 
     # === AT LEAST ONE UWB MODE ===
     uwb_modes = [

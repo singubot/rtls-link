@@ -12,14 +12,6 @@
 #pragma once
 
 // =============================================================================
-// MUTUAL EXCLUSION RULES
-// =============================================================================
-
-#if defined(USE_MAVLINK) && defined(USE_BEACON_PROTOCOL)
-    #error "USE_MAVLINK and USE_BEACON_PROTOCOL are mutually exclusive. Choose one output protocol."
-#endif
-
-// =============================================================================
 // WIFI SUBSYSTEM DEPENDENCIES
 // =============================================================================
 
@@ -68,6 +60,14 @@
 #endif
 
 // =============================================================================
+// RTLSLINK BEACON BACKEND DEPENDENCIES
+// =============================================================================
+
+#if defined(USE_RTLSLINK_BEACON_BACKEND) && !defined(USE_UWB_MODE_TDOA_TAG)
+    #error "USE_RTLSLINK_BEACON_BACKEND requires USE_UWB_MODE_TDOA_TAG to be defined"
+#endif
+
+// =============================================================================
 // BOARD-SPECIFIC FEATURE REQUIREMENTS
 // =============================================================================
 
@@ -108,8 +108,8 @@
 // =============================================================================
 // Tag modes need an output protocol to send position data
 
-#if defined(USE_UWB_MODE_TDOA_TAG) && !defined(USE_MAVLINK) && !defined(USE_BEACON_PROTOCOL)
-    #error "USE_UWB_MODE_TDOA_TAG requires either USE_MAVLINK or USE_BEACON_PROTOCOL for position output"
+#if defined(USE_UWB_MODE_TDOA_TAG) && !defined(USE_MAVLINK) && !defined(USE_RTLSLINK_BEACON_BACKEND)
+    #error "USE_UWB_MODE_TDOA_TAG requires either USE_MAVLINK or USE_RTLSLINK_BEACON_BACKEND for position output"
 #endif
 
 // =============================================================================
