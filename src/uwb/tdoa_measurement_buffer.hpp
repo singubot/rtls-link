@@ -31,10 +31,13 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
     uint64_t staleThresholdUs,
     size_t minMeasurements,
     MeasurementSlot* out,
-    size_t outCapacity)
+    size_t outCapacity,
+    uint8_t minUniqueAnchors = 0)
 {
     MeasurementSnapshotResult result;
     size_t usableFresh = 0;
+    etl::array<bool, AnchorCount> usableAnchorSeen = {};
+    uint8_t usableUniqueAnchors = 0;
 
     for (auto& slot : slots) {
         if (!slot.fresh) {
@@ -50,9 +53,18 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
             continue;
         }
         ++usableFresh;
+        if (!usableAnchorSeen[slot.anchor_a]) {
+            usableAnchorSeen[slot.anchor_a] = true;
+            ++usableUniqueAnchors;
+        }
+        if (!usableAnchorSeen[slot.anchor_b]) {
+            usableAnchorSeen[slot.anchor_b] = true;
+            ++usableUniqueAnchors;
+        }
     }
 
-    result.haveEnough = usableFresh >= minMeasurements;
+    result.haveEnough = usableFresh >= minMeasurements
+                     && usableUniqueAnchors >= minUniqueAnchors;
     result.measurementCountForStats = usableFresh;
     if (!result.haveEnough) {
         return result;

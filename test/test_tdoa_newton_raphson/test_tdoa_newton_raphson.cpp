@@ -225,7 +225,151 @@ TEST_F(TDOANewtonRaphsonTest, EightAnchorAllPairs3D) {
               << " iters=" << result.iterations << std::endl;
 
     EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(result.converged);
     EXPECT_LT(error, 0.05f);
+}
+
+TEST_F(TDOANewtonRaphsonTest, NonConverged3DResultIsInvalid) {
+    tdoa_estimator::PosMatrix anchors(5, 3);
+    anchors << -5.0f, -5.0f, 0.0f,
+                5.0f, -5.0f, 0.0f,
+               -5.0f,  5.0f, 0.0f,
+                5.0f,  5.0f, 2.0f,
+                0.0f,  0.0f, 4.0f;
+
+    std::vector<std::pair<int, int>> measurementAnchorIds = {
+        {0, 1}, {0, 2}, {0, 3}, {0, 4}, {1, 4}, {2, 4}
+    };
+
+    tdoa_estimator::PosVector3D truePosition;
+    truePosition << 0.5f, -0.5f, 1.2f;
+
+    auto [anchorPositionsLeft, anchorPositionsRight, tdoas] =
+        calculateTrueTDOAs(anchors, measurementAnchorIds, truePosition);
+
+    tdoa_estimator::PosVector3D initialGuess = truePosition;
+    initialGuess(0) += 0.05f;
+    initialGuess(1) -= 0.04f;
+    initialGuess(2) += 0.03f;
+
+    auto result = tdoa_estimator::newtonRaphson(
+        anchorPositionsLeft, anchorPositionsRight, tdoas, initialGuess, 0);
+
+    EXPECT_FALSE(result.converged);
+    EXPECT_FALSE(result.valid);
+    EXPECT_LT(result.rmse, 0.8f);
+}
+
+TEST_F(TDOANewtonRaphsonTest, PerfectWarmStart3DIsValid) {
+    tdoa_estimator::PosMatrix anchors(8, 3);
+    anchors << -4.0f, -3.0f, 0.0f,
+                4.0f, -3.0f, 0.0f,
+               -4.0f,  3.0f, 0.0f,
+                4.0f,  3.0f, 0.0f,
+               -4.0f, -3.0f, 3.0f,
+                4.0f, -3.0f, 3.0f,
+               -4.0f,  3.0f, 3.0f,
+                4.0f,  3.0f, 3.0f;
+
+    std::vector<std::pair<int, int>> measurementAnchorIds;
+    for (int a = 0; a < 8; ++a) {
+        for (int b = a + 1; b < 8; ++b) {
+            measurementAnchorIds.push_back({a, b});
+        }
+    }
+
+    tdoa_estimator::PosVector3D truePosition;
+    truePosition << 1.2f, -0.7f, 1.1f;
+
+    auto [anchorPositionsLeft, anchorPositionsRight, tdoas] =
+        calculateTrueTDOAs(anchors, measurementAnchorIds, truePosition);
+
+    auto result = tdoa_estimator::newtonRaphson(
+        anchorPositionsLeft, anchorPositionsRight, tdoas, truePosition, 5);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(result.covarianceValid);
+    EXPECT_LT((result.position - truePosition).norm(), 1e-5f);
+}
+
+TEST_F(TDOANewtonRaphsonTest, Coplanar3DGeometryIsInvalid) {
+    tdoa_estimator::PosMatrix anchors(8, 3);
+    anchors << -4.0f, -3.0f, 0.0f,
+                4.0f, -3.0f, 0.0f,
+               -4.0f,  3.0f, 0.0f,
+                4.0f,  3.0f, 0.0f,
+               -2.0f, -1.0f, 0.0f,
+                2.0f, -1.0f, 0.0f,
+               -2.0f,  1.0f, 0.0f,
+                2.0f,  1.0f, 0.0f;
+
+    std::vector<std::pair<int, int>> measurementAnchorIds;
+    for (int a = 0; a < 8; ++a) {
+        for (int b = a + 1; b < 8; ++b) {
+            measurementAnchorIds.push_back({a, b});
+        }
+    }
+
+    tdoa_estimator::PosVector3D truePosition;
+    truePosition << 0.5f, 0.25f, 0.0f;
+
+    auto [anchorPositionsLeft, anchorPositionsRight, tdoas] =
+        calculateTrueTDOAs(anchors, measurementAnchorIds, truePosition);
+
+    tdoa_estimator::PosVector3D initialGuess = truePosition;
+    initialGuess(0) += 0.25f;
+    initialGuess(1) -= 0.20f;
+
+    auto result = tdoa_estimator::newtonRaphson(
+        anchorPositionsLeft,
+        anchorPositionsRight,
+        tdoas,
+        initialGuess,
+        10);
+
+    EXPECT_FALSE(result.converged);
+    EXPECT_FALSE(result.valid);
+    EXPECT_FALSE(result.covarianceValid);
+}
+
+TEST_F(TDOANewtonRaphsonTest, Coplanar3DGeometryIsInvalidOffPlane) {
+    tdoa_estimator::PosMatrix anchors(8, 3);
+    anchors << -4.0f, -3.0f, 0.0f,
+                4.0f, -3.0f, 0.0f,
+               -4.0f,  3.0f, 0.0f,
+                4.0f,  3.0f, 0.0f,
+               -2.0f, -1.0f, 0.0f,
+                2.0f, -1.0f, 0.0f,
+               -2.0f,  1.0f, 0.0f,
+                2.0f,  1.0f, 0.0f;
+
+    std::vector<std::pair<int, int>> measurementAnchorIds;
+    for (int a = 0; a < 8; ++a) {
+        for (int b = a + 1; b < 8; ++b) {
+            measurementAnchorIds.push_back({a, b});
+        }
+    }
+
+    tdoa_estimator::PosVector3D truePosition;
+    truePosition << 0.5f, 0.25f, 1.5f;
+
+    auto [anchorPositionsLeft, anchorPositionsRight, tdoas] =
+        calculateTrueTDOAs(anchors, measurementAnchorIds, truePosition);
+
+    tdoa_estimator::PosVector3D initialGuess;
+    initialGuess << 0.7f, 0.1f, 1.2f;
+
+    auto result = tdoa_estimator::newtonRaphson(
+        anchorPositionsLeft,
+        anchorPositionsRight,
+        tdoas,
+        initialGuess,
+        10);
+
+    EXPECT_FALSE(result.converged);
+    EXPECT_FALSE(result.valid);
+    EXPECT_FALSE(result.covarianceValid);
 }
 
 TEST_F(TDOANewtonRaphsonTest, RealAnchorLayout3D) {

@@ -2,6 +2,210 @@
 #include "front.hpp"
 #include "logging/logging.hpp"
 
+#include <cerrno>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+
+namespace {
+
+constexpr uint8_t kMaxConfigAnchors = 8;
+
+struct StoredAnchorConfig {
+    bool devIdPresent = false;
+    bool xPresent = false;
+    bool yPresent = false;
+    bool zPresent = false;
+    uint8_t devId = 0;
+};
+
+bool parseU8Strict(String value, uint8_t& out)
+{
+    value.trim();
+    if (value.length() == 0) {
+        return false;
+    }
+
+    uint16_t parsed = 0;
+    for (uint16_t i = 0; i < value.length(); i++) {
+        const char c = value.charAt(i);
+        if (!isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+        parsed = static_cast<uint16_t>(parsed * 10 + (c - '0'));
+        if (parsed > UINT8_MAX) {
+            return false;
+        }
+    }
+
+    out = static_cast<uint8_t>(parsed);
+    return true;
+}
+
+bool parseFiniteFloatStrict(String value)
+{
+    value.trim();
+    if (value.length() == 0) {
+        return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const float parsed = strtof(value.c_str(), &end);
+    if (end == value.c_str() || errno == ERANGE || !std::isfinite(parsed)) {
+        return false;
+    }
+    while (end != nullptr && *end != '\0') {
+        if (!isspace(static_cast<unsigned char>(*end))) {
+            return false;
+        }
+        end++;
+    }
+    return true;
+}
+
+bool parseAnchorSlotParam(const String& paramName, char prefix, uint8_t& outSlot)
+{
+    if (paramName.length() != 2 || paramName.charAt(0) != prefix) {
+        return false;
+    }
+    const char slotChar = paramName.charAt(1);
+    if (slotChar < '1' || slotChar > '8') {
+        return false;
+    }
+    outSlot = static_cast<uint8_t>(slotChar - '1');
+    return true;
+}
+
+bool parseAnchorDevIdParam(const String& paramName, uint8_t& outSlot)
+{
+    if (!paramName.startsWith("devId") || paramName.length() != 6) {
+        return false;
+    }
+    const char slotChar = paramName.charAt(5);
+    if (slotChar < '1' || slotChar > '8') {
+        return false;
+    }
+    outSlot = static_cast<uint8_t>(slotChar - '1');
+    return true;
+}
+
+ConfigError validateStoredUwbAnchorConfig(const char* path)
+{
+    File file = LittleFS.open(path, "r");
+    if (!file) {
+        LOG_ERROR("ConfigManager: Failed to open config file for validation: %s", path);
+        return ConfigError::FILE_SYSTEM_ERROR;
+    }
+
+    StoredAnchorConfig anchors[kMaxConfigAnchors] = {};
+    bool anchorCountPresent = false;
+    uint8_t anchorCount = 0;
+    bool valid = true;
+
+    while (file.available() && valid) {
+        String line = file.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0 || line.startsWith("#")) {
+            continue;
+        }
+
+        const int colonIndex = line.indexOf(':');
+        if (colonIndex == -1) {
+            continue;
+        }
+
+        String key = line.substring(0, colonIndex);
+        String value = line.substring(colonIndex + 1);
+        key.trim();
+        value.trim();
+
+        const int dotIndex = key.indexOf('.');
+        if (dotIndex == -1) {
+            continue;
+        }
+
+        const String group = key.substring(0, dotIndex);
+        if (group != "uwb") {
+            continue;
+        }
+
+        const String paramName = key.substring(dotIndex + 1);
+        if (paramName == "anchorCount") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > kMaxConfigAnchors) {
+                valid = false;
+                break;
+            }
+            anchorCountPresent = true;
+            anchorCount = parsed;
+            continue;
+        }
+
+        uint8_t slot = 0;
+        if (parseAnchorDevIdParam(paramName, slot)) {
+            uint8_t devId = 0;
+            if (!parseU8Strict(value, devId) || devId >= kMaxConfigAnchors) {
+                valid = false;
+                break;
+            }
+            anchors[slot].devIdPresent = true;
+            anchors[slot].devId = devId;
+            continue;
+        }
+
+        if (parseAnchorSlotParam(paramName, 'x', slot)) {
+            anchors[slot].xPresent = parseFiniteFloatStrict(value);
+            valid = anchors[slot].xPresent;
+            continue;
+        }
+        if (parseAnchorSlotParam(paramName, 'y', slot)) {
+            anchors[slot].yPresent = parseFiniteFloatStrict(value);
+            valid = anchors[slot].yPresent;
+            continue;
+        }
+        if (parseAnchorSlotParam(paramName, 'z', slot)) {
+            anchors[slot].zPresent = parseFiniteFloatStrict(value);
+            valid = anchors[slot].zPresent;
+            continue;
+        }
+    }
+
+    file.close();
+
+    if (!valid || !anchorCountPresent || anchorCount == 0) {
+        return valid ? ConfigError::OK : ConfigError::INVALID_CONFIG;
+    }
+
+    bool seen[kMaxConfigAnchors] = {};
+    for (uint8_t slot = 0; slot < anchorCount; slot++) {
+        const StoredAnchorConfig& anchor = anchors[slot];
+        if (!anchor.devIdPresent || !anchor.xPresent || !anchor.yPresent || !anchor.zPresent) {
+            LOG_ERROR("ConfigManager: Config %s missing geometry for UWB anchor slot %u",
+                      path, static_cast<unsigned int>(slot + 1));
+            return ConfigError::INVALID_CONFIG;
+        }
+        if (anchor.devId >= anchorCount || seen[anchor.devId]) {
+            LOG_ERROR("ConfigManager: Config %s has non-contiguous or duplicate UWB anchor id %u",
+                      path, static_cast<unsigned int>(anchor.devId));
+            return ConfigError::INVALID_CONFIG;
+        }
+        seen[anchor.devId] = true;
+    }
+
+    for (uint8_t id = 0; id < anchorCount; id++) {
+        if (!seen[id]) {
+            LOG_ERROR("ConfigManager: Config %s missing UWB anchor id %u",
+                      path, static_cast<unsigned int>(id));
+            return ConfigError::INVALID_CONFIG;
+        }
+    }
+
+    return ConfigError::OK;
+}
+
+} // namespace
+
 // Static member definitions
 etl::string<ConfigManager::MAX_NAME_LENGTH> ConfigManager::s_ActiveConfig;
 etl::vector<ConfigInfo, ConfigManager::MAX_CONFIGS> ConfigManager::s_Configs;
@@ -285,6 +489,11 @@ ConfigError ConfigManager::LoadConfigNamed(const char* name) {
     String configPath = GetConfigPath(name);
     if (!LittleFS.exists(configPath)) {
         return ConfigError::CONFIG_NOT_FOUND;
+    }
+
+    const ConfigError validationResult = validateStoredUwbAnchorConfig(configPath.c_str());
+    if (validationResult != ConfigError::OK) {
+        return validationResult;
     }
 
     // Copy config file to params.txt

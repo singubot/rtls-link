@@ -12,6 +12,7 @@ public:
 
     virtual void Init() override;
     virtual void Update() override;
+    virtual ErrorParam LoadParams() override;
     virtual ErrorParam SetParam(const char* name, const void* data, uint32_t len) override;
 
     virtual etl::span<const ParamDef> GetParamLayout() const override {
@@ -30,6 +31,8 @@ public:
 
 protected:
     void InitBackendForCurrentMode();
+    void ApplyLoadedRuntimeConfig();
+    void ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon);
     etl::vector<UWBAnchorParam, UWBParams::maxAnchorCount> GetAnchors();
 
     UWBBackend* m_Backend = nullptr;

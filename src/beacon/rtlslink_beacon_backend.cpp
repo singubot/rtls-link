@@ -26,7 +26,10 @@ void RTLSLinkBeaconBackend::Init(uint32_t baudrate, size_t tx_buffer_size)
     if (tx_mutex_ == nullptr) {
         tx_mutex_ = xSemaphoreCreateMutex();
     }
-    if (tx_mutex_ == nullptr) {
+    if (config_mutex_ == nullptr) {
+        config_mutex_ = xSemaphoreCreateMutex();
+    }
+    if (tx_mutex_ == nullptr || config_mutex_ == nullptr) {
         LOG_ERROR("RTLSLink beacon backend mutex allocation failed");
         return;
     }
@@ -37,7 +40,7 @@ void RTLSLinkBeaconBackend::Init(uint32_t baudrate, size_t tx_buffer_size)
 
 void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anchors, float rotation_degrees)
 {
-    anchors_.fill({});
+    etl::array<Anchor, kMaxAnchors> next_anchors = {};
     uint8_t max_anchor_id = 0;
     uint8_t configured = 0;
 
@@ -48,12 +51,17 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
                      anchor_param.shortAddr[0], anchor_param.shortAddr[1]);
             continue;
         }
+        if (next_anchors[anchor_id].valid) {
+            LOG_WARN("RTLSLink beacon ignoring duplicate anchor id %u",
+                     static_cast<unsigned int>(anchor_id));
+            continue;
+        }
 
         float x = anchor_param.x;
         float y = anchor_param.y;
         Rotate(rotation_degrees, x, y);
 
-        anchors_[anchor_id] = {
+        next_anchors[anchor_id] = {
             .id = anchor_id,
             .x_mm = MetersToMm(x),
             .y_mm = MetersToMm(y),
@@ -64,18 +72,37 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
         configured++;
     }
 
+    if (configured > 0) {
+        const uint8_t required_count = static_cast<uint8_t>(max_anchor_id + 1);
+        bool contiguous = configured == required_count;
+        for (uint8_t id = 0; contiguous && id < required_count; id++) {
+            contiguous = next_anchors[id].valid;
+        }
+        if (!contiguous) {
+            LOG_ERROR("RTLSLink beacon rejected non-contiguous anchor ids (configured=%u max=%u)",
+                      static_cast<unsigned int>(configured),
+                      static_cast<unsigned int>(max_anchor_id));
+            next_anchors.fill({});
+            max_anchor_id = 0;
+            configured = 0;
+        }
+    }
+
+    if (config_mutex_ == nullptr || xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+        LOG_WARN("RTLSLink beacon config skipped - mutex busy");
+        return;
+    }
+
+    anchors_ = next_anchors;
     anchor_count_ = configured == 0 ? 0 : static_cast<uint8_t>(max_anchor_id + 1);
     config_accepted_ = false;
+    awaiting_config_ack_ = false;
     last_config_ms_ = 0;
+    xSemaphoreGive(config_mutex_);
 
     LOG_INFO("RTLSLink beacon configured %u anchors (count=%u)",
              static_cast<unsigned int>(configured),
              static_cast<unsigned int>(anchor_count_));
-    if (configured != anchor_count_) {
-        LOG_WARN("RTLSLink beacon requires contiguous anchor ids 0..%u; configured=%u",
-                 static_cast<unsigned int>(anchor_count_ - 1),
-                 static_cast<unsigned int>(configured));
-    }
 }
 
 void RTLSLinkBeaconBackend::Update()
@@ -92,7 +119,13 @@ void RTLSLinkBeaconBackend::Update()
         }
     }
 
-    if (!config_accepted_) {
+    bool needs_config = false;
+    if (config_mutex_ != nullptr && xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
+        needs_config = !config_accepted_;
+        xSemaphoreGive(config_mutex_);
+    }
+
+    if (needs_config) {
         const uint32_t now_ms = millis();
         if ((now_ms - last_config_ms_) >= kConfigRetryIntervalMs) {
             SendConfig();
@@ -104,7 +137,16 @@ void RTLSLinkBeaconBackend::Update()
 
 void RTLSLinkBeaconBackend::SendPosition(float x_m, float y_m, float z_m)
 {
-    if (!initialized_ || !config_accepted_) {
+    if (!initialized_ || config_mutex_ == nullptr) {
+        return;
+    }
+
+    if (xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return;
+    }
+    const bool can_send = config_accepted_;
+    xSemaphoreGive(config_mutex_);
+    if (!can_send) {
         return;
     }
 
@@ -122,20 +164,33 @@ bool RTLSLinkBeaconBackend::EnqueueTdoa(uint8_t anchor_a,
                                         float sigma_m,
                                         uint64_t solved_timestamp_us)
 {
-    if (!initialized_ || !config_accepted_) {
+    if (!initialized_ || config_mutex_ == nullptr) {
+        return false;
+    }
+
+    if (xSemaphoreTake(config_mutex_, 0) != pdTRUE) {
+        return false;
+    }
+
+    if (!config_accepted_) {
+        xSemaphoreGive(config_mutex_);
         return false;
     }
     if (anchor_a >= anchor_count_ || anchor_b >= anchor_count_ || anchor_a == anchor_b) {
+        xSemaphoreGive(config_mutex_);
         return false;
     }
     if (!anchors_[anchor_a].valid || !anchors_[anchor_b].valid) {
+        xSemaphoreGive(config_mutex_);
         return false;
     }
     if (!std::isfinite(distance_diff_m) || !std::isfinite(sigma_m)) {
+        xSemaphoreGive(config_mutex_);
         return false;
     }
 
     if (!TdoaPassesPhysicalGuard(anchor_a, anchor_b, distance_diff_m)) {
+        xSemaphoreGive(config_mutex_);
         return false;
     }
 
@@ -152,7 +207,9 @@ bool RTLSLinkBeaconBackend::EnqueueTdoa(uint8_t anchor_a,
         .anchor_b = anchor_b,
     };
 
-    return SendTdoa(pending);
+    const bool sent = SendTdoa(pending);
+    xSemaphoreGive(config_mutex_);
+    return sent;
 }
 
 bool RTLSLinkBeaconBackend::ParseAnchorId(const UWBShortAddr& short_addr, uint8_t& out_anchor_id)
@@ -336,23 +393,43 @@ void RTLSLinkBeaconBackend::HandleFrame()
     const uint8_t version = rx_payload_[2];
 
     if (acked == MsgId::CONFIG_END && status == AckStatus::OK && version == kProtocolVersion) {
+        if (config_mutex_ == nullptr || xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+            return;
+        }
+        if (!awaiting_config_ack_ || rx_seq_ != expected_config_end_seq_) {
+            xSemaphoreGive(config_mutex_);
+            return;
+        }
         if (!config_accepted_) {
             LOG_INFO("RTLSLink beacon config accepted");
         }
         config_accepted_ = true;
+        awaiting_config_ack_ = false;
+        xSemaphoreGive(config_mutex_);
     } else if (status != AckStatus::OK) {
+        if (config_mutex_ == nullptr || xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+            return;
+        }
         config_accepted_ = false;
+        awaiting_config_ack_ = false;
+        xSemaphoreGive(config_mutex_);
     }
 }
 
 void RTLSLinkBeaconBackend::SendConfig()
 {
-    if (anchor_count_ == 0) {
+    if (config_mutex_ == nullptr || xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
         return;
     }
 
+    if (anchor_count_ == 0) {
+        xSemaphoreGive(config_mutex_);
+        return;
+    }
+
+    bool all_sent = true;
     uint8_t hello[3] = {kProtocolVersion, 0, anchor_count_};
-    SendFrame(MsgId::HELLO, hello, sizeof(hello));
+    all_sent = SendFrame(MsgId::HELLO, hello, sizeof(hello)) && all_sent;
 
     for (uint8_t id = 0; id < anchor_count_; id++) {
         const Anchor& anchor = anchors_[id];
@@ -365,7 +442,7 @@ void RTLSLinkBeaconBackend::SendConfig()
         WriteI32Le(&payload[1], anchor.x_mm);
         WriteI32Le(&payload[5], anchor.y_mm);
         WriteI32Le(&payload[9], anchor.z_mm);
-        SendFrame(MsgId::ANCHOR_CONFIG, payload, sizeof(payload));
+        all_sent = SendFrame(MsgId::ANCHOR_CONFIG, payload, sizeof(payload)) && all_sent;
     }
 
     const auto& params = Front::uwbLittleFSFront.GetParams();
@@ -377,11 +454,20 @@ void RTLSLinkBeaconBackend::SendConfig()
         WriteI32Le(&origin_payload[0], origin_lat_e7);
         WriteI32Le(&origin_payload[4], origin_lon_e7);
         WriteI32Le(&origin_payload[8], origin_alt_cm);
-        SendFrame(MsgId::ORIGIN_CONFIG, origin_payload, sizeof(origin_payload));
+        all_sent = SendFrame(MsgId::ORIGIN_CONFIG, origin_payload, sizeof(origin_payload)) && all_sent;
     }
 
     uint8_t config_end[1] = {anchor_count_};
-    SendFrame(MsgId::CONFIG_END, config_end, sizeof(config_end));
+    uint8_t config_end_seq = 0;
+    if (all_sent && SendFrame(MsgId::CONFIG_END, config_end, sizeof(config_end), &config_end_seq)) {
+        expected_config_end_seq_ = config_end_seq;
+        awaiting_config_ack_ = true;
+        config_accepted_ = false;
+    } else {
+        awaiting_config_ack_ = false;
+    }
+
+    xSemaphoreGive(config_mutex_);
 }
 
 bool RTLSLinkBeaconBackend::SendTdoa(const PendingTdoa& tdoa)
@@ -418,14 +504,18 @@ bool RTLSLinkBeaconBackend::SendTdoa(const PendingTdoa& tdoa)
     return true;
 }
 
-void RTLSLinkBeaconBackend::SendFrame(MsgId msg_id, const uint8_t* payload, uint8_t payload_len)
+bool RTLSLinkBeaconBackend::SendFrame(MsgId msg_id,
+                                      const uint8_t* payload,
+                                      uint8_t payload_len,
+                                      uint8_t* out_seq)
 {
     if (!TakeTxMutex(pdMS_TO_TICKS(5))) {
-        return;
+        return false;
     }
 
-    WriteFrameLocked(msg_id, payload, payload_len);
+    WriteFrameLocked(msg_id, payload, payload_len, out_seq);
     GiveTxMutex();
+    return true;
 }
 
 bool RTLSLinkBeaconBackend::TakeTxMutex(TickType_t timeout_ticks)
@@ -442,7 +532,10 @@ void RTLSLinkBeaconBackend::GiveTxMutex()
     xSemaphoreGive(tx_mutex_);
 }
 
-void RTLSLinkBeaconBackend::WriteFrameLocked(MsgId msg_id, const uint8_t* payload, uint8_t payload_len)
+void RTLSLinkBeaconBackend::WriteFrameLocked(MsgId msg_id,
+                                             const uint8_t* payload,
+                                             uint8_t payload_len,
+                                             uint8_t* out_seq)
 {
     uint8_t frame[2 + 3 + kPayloadLenMax + 2];
     uint8_t len = 0;
@@ -450,7 +543,11 @@ void RTLSLinkBeaconBackend::WriteFrameLocked(MsgId msg_id, const uint8_t* payloa
     frame[len++] = kFrameMagic2;
     frame[len++] = static_cast<uint8_t>(msg_id);
     frame[len++] = payload_len;
-    frame[len++] = seq_++;
+    const uint8_t frame_seq = seq_++;
+    frame[len++] = frame_seq;
+    if (out_seq != nullptr) {
+        *out_seq = frame_seq;
+    }
 
     for (uint8_t i = 0; i < payload_len; i++) {
         frame[len++] = payload[i];

@@ -16,14 +16,15 @@
 #include "uwb_tdoa_anchor.hpp"
 #endif
 
-#ifdef USE_RTLSLINK_BEACON_BACKEND
 namespace {
 
-bool isRtlslinkAnchorConfigParam(const char* name)
+bool isStaticAnchorCommitParam(const char* name)
 {
-    if (strcmp(name, "outputBackend") == 0 || strcmp(name, "rotationDegrees") == 0 || strcmp(name, "anchorCount") == 0) {
-        return true;
-    }
+    return strcmp(name, "anchorCount") == 0;
+}
+
+bool isStaticAnchorGeometryParam(const char* name)
+{
     if (name[0] == 'x' || name[0] == 'y' || name[0] == 'z') {
         return name[1] >= '1' && name[1] <= '8' && name[2] == '\0';
     }
@@ -33,8 +34,18 @@ bool isRtlslinkAnchorConfigParam(const char* name)
     return false;
 }
 
-} // namespace
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+bool isRtlslinkRuntimeConfigParam(const char* name)
+{
+    return strcmp(name, "outputBackend") == 0
+        || strcmp(name, "rotationDegrees") == 0
+        || strcmp(name, "originLat") == 0
+        || strcmp(name, "originLon") == 0
+        || strcmp(name, "originAlt") == 0;
+}
 #endif
+
+} // namespace
 
 void UWBLittleFSFrontend::InitBackendForCurrentMode() {
     if (m_Backend != nullptr) {
@@ -79,6 +90,64 @@ void UWBLittleFSFrontend::Init() {
     LOG_INFO("UWB frontend initialized");
 }
 
+ErrorParam UWBLittleFSFrontend::LoadParams() {
+    const ErrorParam result = LittleFSFrontend<UWBParams>::LoadParams();
+    if (result == ErrorParam::OK) {
+        ApplyLoadedRuntimeConfig();
+    }
+    return result;
+}
+
+void UWBLittleFSFrontend::ApplyLoadedRuntimeConfig()
+{
+    if (m_Params.mode != UWBMode::TAG_TDOA || m_Backend == nullptr) {
+        return;
+    }
+
+    ApplyStaticAnchorsToLiveBackends(true, true);
+}
+
+void UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon)
+{
+    if (m_Params.mode != UWBMode::TAG_TDOA) {
+        return;
+    }
+
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+    if (m_Params.dynamicAnchorPosEnabled != 0) {
+        if (applyEstimator) {
+            LOG_INFO("Static anchor config saved; dynamic anchor positioning is active");
+        }
+#if defined(USE_RTLSLINK_BEACON_BACKEND) && defined(USE_UWB_MODE_TDOA_TAG)
+        if (applyRtlslinkBeacon) {
+            UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors();
+        }
+#else
+        (void)applyRtlslinkBeacon;
+#endif
+        return;
+    }
+#endif
+
+    auto anchors = GetAnchors();
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    if (applyRtlslinkBeacon) {
+        App::ConfigureRtlslinkBeaconAnchors(anchors);
+    }
+#else
+    (void)applyRtlslinkBeacon;
+#endif
+
+#ifdef USE_UWB_MODE_TDOA_TAG
+    if (applyEstimator) {
+        UWBTagTDoA::ApplyStaticAnchors(anchors);
+    }
+#else
+    (void)applyEstimator;
+#endif
+}
+
 ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uint32_t len) {
     ErrorParam result = LittleFSFrontend<UWBParams>::SetParam(name, data, len);
     if (result != ErrorParam::OK) {
@@ -119,18 +188,36 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
     }
 #endif
 
-#ifdef USE_RTLSLINK_BEACON_BACKEND
-    if (m_Params.mode == UWBMode::TAG_TDOA && isRtlslinkAnchorConfigParam(name)) {
-#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
-        if (m_Params.dynamicAnchorPosEnabled != 0) {
-            LOG_INFO("RTLSLink beacon static anchor config skipped while dynamic anchors are enabled");
-            return result;
+#if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
+    if (strcmp(name, "dynamicAnchorPosEnabled") == 0 && m_Params.mode == UWBMode::TAG_TDOA) {
+        UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
+        if (m_Params.dynamicAnchorPosEnabled == 0) {
+            ApplyStaticAnchorsToLiveBackends(true, true);
+        } else {
+            ApplyStaticAnchorsToLiveBackends(false, true);
         }
-#endif
-        auto anchors = GetAnchors();
-        App::ConfigureRtlslinkBeaconAnchors(anchors);
     }
 #endif
+
+    if (m_Params.mode == UWBMode::TAG_TDOA) {
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+        if (isRtlslinkRuntimeConfigParam(name)) {
+            ApplyStaticAnchorsToLiveBackends(false, true);
+        }
+#endif
+        if (isStaticAnchorCommitParam(name)) {
+            ApplyStaticAnchorsToLiveBackends(true, true);
+        } else if (isStaticAnchorGeometryParam(name)) {
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+            if (m_Params.dynamicAnchorPosEnabled != 0) {
+                LOG_INFO("Static anchor parameter saved; dynamic anchor positioning is active");
+            } else
+#endif
+            {
+                LOG_INFO("Static anchor parameter saved; write anchorCount to apply live");
+            }
+        }
+    }
 
     return result;
 }

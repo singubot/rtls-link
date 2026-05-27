@@ -588,6 +588,10 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
                 status = rtls::protocol::StatusCode::FileSystemError;
                 message = "File system error";
                 break;
+            case ConfigError::INVALID_CONFIG:
+                status = rtls::protocol::StatusCode::Error;
+                message = "Invalid configuration";
+                break;
             default:
                 status = rtls::protocol::StatusCode::Error;
                 message = "Config operation failed";
@@ -1152,6 +1156,9 @@ static void saveConfigAsCallback(cmd* c)
             break;
         case ConfigError::FILE_SYSTEM_ERROR:
             commandResult = "{\"success\":false,\"error\":\"File system error\"}";
+            break;
+        case ConfigError::INVALID_CONFIG:
+            commandResult = "{\"success\":false,\"error\":\"Invalid configuration\"}";
             break;
         default:
             commandResult = "{\"success\":false,\"error\":\"Unknown error\"}";
