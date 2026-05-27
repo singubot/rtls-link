@@ -13,12 +13,39 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
 #include "logging/logging.hpp"
+#include "uwb/uwb_frontend_littlefs.hpp"
 
 namespace ota {
 
 // Delay reboot long enough for the HTTP response to leave the TCP stack.
 static constexpr uint32_t REBOOT_DELAY_MS = 1500;
 static TimerHandle_t rebootTimer = nullptr;
+
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+static bool uwbSuspendedForOta = false;
+
+static void suspendUwbForOtaIfSupported() {
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+    if (uwbParams.uwbEnable == 0 || uwbParams.mode != UWBMode::ANCHOR_TDOA) {
+        return;
+    }
+
+    LOG_INFO("[OTA] Suspending anchor UWB radio for update");
+    Front::uwbLittleFSFront.SetRuntimeEnabled(false);
+    uwbSuspendedForOta = true;
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+static void resumeUwbAfterFailedOta() {
+    if (!uwbSuspendedForOta) {
+        return;
+    }
+
+    LOG_WARN("[OTA] Update failed, resuming suspended anchor UWB radio");
+    Front::uwbLittleFSFront.SetRuntimeEnabled(true);
+    uwbSuspendedForOta = false;
+}
+#endif
 
 static void rebootTimerCallback(TimerHandle_t timer) {
     LOG_INFO("[OTA] Reboot timer elapsed, rebooting...");
@@ -88,6 +115,10 @@ void initOtaRoutes(AsyncWebServer& server) {
 
             if (success) {
                 scheduleReboot();
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+            } else {
+                resumeUwbAfterFailedOta();
+#endif
             }
         },
         // File upload handler (called for each chunk)
@@ -96,6 +127,9 @@ void initOtaRoutes(AsyncWebServer& server) {
 
             if (index == 0) {
                 LOG_INFO("[OTA] Starting update: %s", filename.c_str());
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+                suspendUwbForOtaIfSupported();
+#endif
 
                 // Calculate available space
                 size_t maxSize = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;

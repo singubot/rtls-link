@@ -66,6 +66,7 @@
 // --- UWB Modes ---
 #define USE_UWB_MODE_TDOA_ANCHOR
 #define USE_UWB_MODE_TDOA_TAG
+#define USE_UWB_ANCHOR_TELEMETRY
 
 // --- Dynamic anchor position calculation (TDoA tags) ---
 // Enables automatic calculation of anchor positions from inter-anchor distances

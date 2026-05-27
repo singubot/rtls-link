@@ -35,6 +35,10 @@
     #error "USE_WIFI_MDNS requires USE_WIFI to be defined"
 #endif
 
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && !defined(USE_WIFI)
+    #error "USE_UWB_ANCHOR_TELEMETRY requires USE_WIFI to be defined"
+#endif
+
 // =============================================================================
 // MAVLINK SUBSYSTEM DEPENDENCIES
 // =============================================================================
@@ -122,6 +126,10 @@
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(MAKERFABS_ESP32_BOARD)
     #error "USE_DYNAMIC_ANCHOR_POSITIONS is not supported on MAKERFABS_ESP32_BOARD (insufficient DRAM)"
+#endif
+
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && !defined(USE_UWB_MODE_TDOA_ANCHOR)
+    #error "USE_UWB_ANCHOR_TELEMETRY requires USE_UWB_MODE_TDOA_ANCHOR to be defined"
 #endif
 
 // =============================================================================

@@ -117,6 +117,9 @@ struct UWBParams {
     // NOTE: 0 values keep legacy behavior (8 slots, ~2ms slot length).
     uint8_t tdoaSlotCount = 0;          // Active TDMA slots per frame (2-8), 0=legacy (8)
     uint16_t tdoaSlotDurationUs = 0;    // Slot duration in microseconds, 0=legacy (~2ms)
+    uint8_t tdoaAnchorTelemetryEnable = 0;      // 0=disabled, 1=periodically send anchor stats over UDP
+    uint16_t tdoaAnchorTelemetryIntervalMs = 1000; // UDP telemetry interval, clamped to 250-60000ms
+    uint16_t tdoaAnchorTelemetryPort = 3335;    // UDP destination port for anchor stats telemetry
 #ifdef ESP32S3_UWB_BOARD
     uint8_t tdoaMatcherPolicy = 0;      // 0=YOUNGEST, 1=RANDOM/rotating eligible candidate
 #endif

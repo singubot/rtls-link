@@ -13,6 +13,7 @@
 #include "version.hpp"
 #include "logging/logging.hpp"
 #include "protocol/rtls_binary_protocol.hpp"
+#include "protocol/tdoa_anchor_stats_frame.hpp"
 
 #include "uwb/uwb_frontend_littlefs.hpp"
 #include "app/app_frontend_littlefs.hpp"
@@ -544,48 +545,7 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
             return true;
         }
 
-        outFrame.Begin(rtls::protocol::FrameType::TdoaAnchorStats);
-        outFrame.AppendU8(stats.version);
-        outFrame.AppendU8(stats.anchorId);
-        outFrame.AppendU8(stats.activeSlots);
-        outFrame.AppendU8(stats.state);
-        outFrame.AppendU8(stats.slotState);
-        outFrame.AppendU8(stats.slot);
-        outFrame.AppendU8(stats.nextSlot);
-        outFrame.AppendBool(stats.txEnabled != 0);
-        outFrame.AppendU16(stats.antennaDelay);
-        outFrame.AppendU32(stats.slotDurationUs);
-        outFrame.AppendU32(stats.frameDurationUs);
-        outFrame.AppendU8(stats.slot0MissStreak);
-        outFrame.AppendU32(stats.slot0Misses);
-        outFrame.AppendU32(stats.syncAcquisitions);
-        outFrame.AppendU32(stats.syncLosses);
-        outFrame.AppendU32(stats.resyncs);
-        outFrame.AppendU32(stats.stallResets);
-        outFrame.AppendU32(stats.txScheduled);
-        outFrame.AppendU32(stats.txDone);
-        uint8_t slotCount = stats.activeSlots;
-        if (slotCount == 0 || slotCount > UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT) {
-            slotCount = UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT;
-        }
-        outFrame.AppendU8(slotCount);
-        for (uint8_t i = 0; i < slotCount; i++) {
-            outFrame.AppendU8(stats.packetIds[i]);
-        }
-        for (uint8_t i = 0; i < slotCount; i++) {
-            outFrame.AppendU16(stats.distances[i]);
-        }
-        for (uint8_t i = 0; i < slotCount; i++) {
-            const uwbTdoa2AnchorSlotStats_t& slot = stats.slots[i];
-            outFrame.AppendU32(slot.goodRx);
-            outFrame.AppendU32(slot.rxTimeout);
-            outFrame.AppendU32(slot.rxFailed);
-            outFrame.AppendU32(slot.unexpectedPacket);
-            outFrame.AppendU32(slot.validDistance);
-            outFrame.AppendU32(slot.invalidDistance);
-            outFrame.AppendU32(slot.packetIdMismatch);
-        }
-        outFrame.Finish();
+        rtls::protocol::AppendTdoaAnchorStatsFrame(outFrame, stats);
         xSemaphoreGive(commandQueueMutex);
         return true;
     }
