@@ -688,6 +688,45 @@ TEST_F(TDOANewtonRaphsonTest, OffsetInitialGuess3D) {
     EXPECT_LT(err, 0.5f);
 }
 
+TEST_F(TDOANewtonRaphsonTest, SparseEightAnchorBatchConvergesFromEndpointAverage) {
+    tdoa_estimator::PosMatrix anchors(8, 3);
+    anchors << 0.0f, 0.0f, 1.8f,
+               5.5f, 0.0f, 1.8f,
+               0.0f, 2.5f, 1.8f,
+               5.5f, 2.5f, 1.8f,
+               2.8f, 0.0f, 0.8f,
+               0.0f, 1.2f, 3.0f,
+               5.5f, 1.2f, 2.6f,
+               2.8f, 2.5f, 0.9f;
+
+    tdoa_estimator::PosVector3D truePosition;
+    truePosition << 2.7f, 1.1f, 1.4f;
+
+    std::vector<std::pair<int, int>> measurementAnchorIds = {
+        {0, 1}, {1, 2}, {2, 4}, {4, 6}, {6, 7}
+    };
+
+    auto [L, R, tdoas] = calculateTrueTDOAs(anchors, measurementAnchorIds, truePosition);
+
+    tdoa_estimator::PosVector3D initialGuess = tdoa_estimator::PosVector3D::Zero();
+    for (int i = 0; i < L.rows(); ++i) {
+        initialGuess += L.row(i).transpose();
+        initialGuess += R.row(i).transpose();
+    }
+    initialGuess /= static_cast<Scalar>(2 * L.rows());
+
+    auto result = tdoa_estimator::newtonRaphson(L, R, tdoas, initialGuess, 10);
+    Scalar err = (result.position - truePosition).norm();
+    std::cout << "Sparse 8-anchor batch err=" << err
+              << " iters=" << result.iterations
+              << " converged=" << result.converged << std::endl;
+
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(result.converged);
+    EXPECT_FALSE(result.position.hasNaN());
+    EXPECT_LT(err, 0.25f);
+}
+
 // Iteration count regression: warm-started, well-conditioned solve should
 // converge in ≤ 3 iterations.
 TEST_F(TDOANewtonRaphsonTest, WarmStartConvergesQuickly) {

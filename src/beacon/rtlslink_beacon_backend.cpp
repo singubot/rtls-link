@@ -43,18 +43,21 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
     etl::array<Anchor, kMaxAnchors> next_anchors = {};
     uint8_t max_anchor_id = 0;
     uint8_t configured = 0;
+    bool invalid_config = false;
 
     for (const auto& anchor_param : anchors) {
         uint8_t anchor_id = 0;
         if (!ParseAnchorId(anchor_param.shortAddr, anchor_id) || anchor_id >= kMaxAnchors) {
-            LOG_WARN("RTLSLink beacon ignoring anchor '%c%c'",
+            LOG_ERROR("RTLSLink beacon rejected anchor config: invalid id '%c%c'",
                      anchor_param.shortAddr[0], anchor_param.shortAddr[1]);
-            continue;
+            invalid_config = true;
+            break;
         }
         if (next_anchors[anchor_id].valid) {
-            LOG_WARN("RTLSLink beacon ignoring duplicate anchor id %u",
+            LOG_ERROR("RTLSLink beacon rejected anchor config: duplicate id %u",
                      static_cast<unsigned int>(anchor_id));
-            continue;
+            invalid_config = true;
+            break;
         }
 
         float x = anchor_param.x;
@@ -72,7 +75,7 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
         configured++;
     }
 
-    if (configured > 0) {
+    if (!invalid_config && configured > 0) {
         const uint8_t required_count = static_cast<uint8_t>(max_anchor_id + 1);
         bool contiguous = configured == required_count;
         for (uint8_t id = 0; contiguous && id < required_count; id++) {
@@ -86,6 +89,11 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
             max_anchor_id = 0;
             configured = 0;
         }
+    }
+    if (invalid_config) {
+        next_anchors.fill({});
+        max_anchor_id = 0;
+        configured = 0;
     }
 
     if (config_mutex_ == nullptr || xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {

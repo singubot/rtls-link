@@ -104,6 +104,10 @@ void UWBLittleFSFrontend::ApplyLoadedRuntimeConfig()
         return;
     }
 
+#if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
+    UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
+#endif
+
     ApplyStaticAnchorsToLiveBackends(true, true);
 }
 

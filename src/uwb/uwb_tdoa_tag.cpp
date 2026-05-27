@@ -181,17 +181,20 @@ static uint8_t applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors)
 
     uint8_t configured = 0;
     uint8_t max_anchor_id = 0;
+    bool invalid_config = false;
     for (const auto& anchor : anchors) {
         uint8_t anchorId = 0;
         if (!tdoa::ParseAnchorId(anchor.shortAddr, anchorId) || anchorId >= kNumAnchors) {
-            LOG_WARN("Ignoring invalid configured anchor short address '%c%c' (expected 0-7)",
+            LOG_ERROR("Rejected static anchor config: invalid short address '%c%c' (expected 0-7)",
                      anchor.shortAddr[0], anchor.shortAddr[1]);
-            continue;
+            invalid_config = true;
+            break;
         }
         if (configured_anchor_ids[anchorId]) {
-            LOG_WARN("Ignoring duplicate configured anchor id %u",
+            LOG_ERROR("Rejected static anchor config: duplicate anchor id %u",
                      static_cast<unsigned int>(anchorId));
-            continue;
+            invalid_config = true;
+            break;
         }
         anchor_positions[anchorId] = anchor;
         configured_anchor_ids[anchorId] = true;
@@ -199,7 +202,7 @@ static uint8_t applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors)
         configured++;
     }
 
-    if (configured > 0) {
+    if (!invalid_config && configured > 0) {
         const uint8_t required_count = static_cast<uint8_t>(max_anchor_id + 1);
         bool contiguous = configured == required_count;
         for (uint8_t id = 0; contiguous && id < required_count; id++) {
@@ -213,6 +216,11 @@ static uint8_t applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors)
             configured_anchor_ids.fill(false);
             configured = 0;
         }
+    }
+    if (invalid_config) {
+        anchor_positions.fill({});
+        configured_anchor_ids.fill(false);
+        configured = 0;
     }
 
     clearFreshMeasurementsLocked();
@@ -865,7 +873,8 @@ static void estimatorProcess() {
     static bool first_estimation = true;
     static bool last_use_2d = true;
     static constexpr tdoa_estimator::Scalar ASSUMED_TAG_Z = 0.0f;
-    static constexpr int NUM_ITERATIONS = 5;
+    static constexpr int NUM_ITERATIONS_2D = 5;
+    static constexpr int NUM_ITERATIONS_3D = 10;
 
     // Continuous task — block on notification until producer wakes us, or
     // until the watchdog timeout elapses (so dynamic-anchor / stats
@@ -1044,7 +1053,7 @@ static void estimatorProcess() {
                 tdoas,
                 initial_guess_2d,
                 fixed_z_for_estimation,
-                NUM_ITERATIONS,
+                NUM_ITERATIONS_2D,
                 1e-3f,  // convergenceThreshold
                 rmseThreshold
             );
@@ -1089,7 +1098,7 @@ static void estimatorProcess() {
                 anchors_right,
                 tdoas,
                 initial_guess_3d,
-                NUM_ITERATIONS,
+                NUM_ITERATIONS_3D,
                 1e-3f,  // convergenceThreshold
                 rmseThreshold
             );
