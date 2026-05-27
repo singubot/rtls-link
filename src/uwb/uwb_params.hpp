@@ -78,6 +78,14 @@ struct UWBParams {
     float x6;
     float y6;
     float z6;
+    UWBShortAddr devId7 = {'6', '\0'};
+    float x7 = 0.0f;
+    float y7 = 0.0f;
+    float z7 = 0.0f;
+    UWBShortAddr devId8 = {'7', '\0'};
+    float x8 = 0.0f;
+    float y8 = 0.0f;
+    float z8 = 0.0f;
     uint16_t ADelay;            // Antenna delay    
     double originLat;           // Origin Latitude
     double originLon;           // Origin Longitude
@@ -139,7 +147,7 @@ struct UWBParams {
     uint8_t tdoaAnchorModelHealthQuorum = 5;
 
     // static constant values that will be useful for parameter reading & writing
-    static constexpr uint8_t maxAnchorCount = 6;
+    static constexpr uint8_t maxAnchorCount = 8;
 }ULS_PACKED;
 
 /**

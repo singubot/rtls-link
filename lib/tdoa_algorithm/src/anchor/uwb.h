@@ -33,7 +33,7 @@
 #include "libdw1000.h"
 
 
-#define MAX_ANCHORS 6
+#define MAX_ANCHORS 8
 
 typedef struct uwbConfig_s {
   uint8_t mode;

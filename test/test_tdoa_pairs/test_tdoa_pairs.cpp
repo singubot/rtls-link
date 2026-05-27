@@ -20,6 +20,20 @@ TEST(TDoAPairs, PairIndexMatchesExpectedFourAnchorOrder)
     EXPECT_EQ(tdoa::PairIndexCanonical(pair, 4), 4);
 }
 
+TEST(TDoAPairs, PairIndexMatchesExpectedEightAnchorBoundary)
+{
+    EXPECT_EQ(tdoa::PairCount(8), 28);
+    EXPECT_EQ(tdoa::PairIndex(0, 1, 8), 0);
+    EXPECT_EQ(tdoa::PairIndex(0, 7, 8), 6);
+    EXPECT_EQ(tdoa::PairIndex(1, 2, 8), 7);
+    EXPECT_EQ(tdoa::PairIndex(1, 7, 8), 12);
+    EXPECT_EQ(tdoa::PairIndex(6, 7, 8), 27);
+
+    constexpr tdoa::AnchorPair last = tdoa::PairByIndex<8>(27);
+    EXPECT_EQ(last.a, 6);
+    EXPECT_EQ(last.b, 7);
+}
+
 TEST(TDoAPairs, PairIndexIsOrderIndependent)
 {
     EXPECT_EQ(tdoa::PairIndex(1, 0, 4), 0);
@@ -73,6 +87,9 @@ TEST(TDoACommon, ParseAnchorIdAcceptsOneAndTwoDigitIds)
 
     EXPECT_TRUE(tdoa::ParseAnchorId(etl::array<char, 2>{'1', '2'}, anchorId, 13));
     EXPECT_EQ(anchorId, 12);
+
+    EXPECT_TRUE(tdoa::ParseAnchorId(etl::array<char, 2>{'7', '\0'}, anchorId));
+    EXPECT_EQ(anchorId, 7);
 }
 
 TEST(TDoACommon, ParseAnchorIdRejectsInvalidIds)
@@ -145,6 +162,26 @@ TEST(TDoAMeasurementBuffer, SnapshotExpiresInvalidAnchorSlotsBeforeIndexingConfi
     EXPECT_EQ(result.expired, 1);
     EXPECT_EQ(result.consumed, 0);
     EXPECT_FALSE(slots[0].fresh);
+}
+
+TEST(TDoAMeasurementBuffer, SnapshotSupportsEightAnchorBoundaryPair)
+{
+    etl::array<tdoa::MeasurementSlot, tdoa::PairCount(8)> slots = {};
+    etl::array<bool, 8> configured = {true, true, true, true, true, true, true, true};
+    tdoa::MeasurementSlot snapshot[tdoa::PairCount(8)] = {};
+
+    slots[tdoa::PairIndex(0, 1, 8)] = tdoa::MeasurementSlot{1.0f, 90, 0, 1, true};
+    slots[tdoa::PairIndex(6, 7, 8)] = tdoa::MeasurementSlot{2.0f, 95, 6, 7, true};
+
+    const tdoa::MeasurementSnapshotResult result =
+        tdoa::SnapshotFreshMeasurements(slots, configured, 100, 50, 2, snapshot, tdoa::PairCount(8));
+
+    EXPECT_TRUE(result.haveEnough);
+    EXPECT_EQ(result.copied, 2);
+    EXPECT_EQ(snapshot[0].anchor_a, 0);
+    EXPECT_EQ(snapshot[0].anchor_b, 1);
+    EXPECT_EQ(snapshot[1].anchor_a, 6);
+    EXPECT_EQ(snapshot[1].anchor_b, 7);
 }
 
 TEST(RunningStats, AppendsJsonToFixedBuilder)

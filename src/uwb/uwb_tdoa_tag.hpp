@@ -25,8 +25,6 @@ extern "C" {
 struct DynamicAnchorTelemetry;
 #endif
 
-#define MAX_ANCHORS 6
-
 class UWBTagTDoA : public UWBBackend {
 public:
     UWBTagTDoA(const bsp::UWBConfig& uwb_config, etl::span<const UWBAnchorParam> anchors);

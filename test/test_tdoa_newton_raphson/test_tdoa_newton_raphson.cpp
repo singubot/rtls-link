@@ -189,6 +189,45 @@ TEST_F(TDOANewtonRaphsonTest, DifferentAnchorConfigurations3D) {
     }
 }
 
+TEST_F(TDOANewtonRaphsonTest, EightAnchorAllPairs3D) {
+    tdoa_estimator::PosMatrix anchors(8, 3);
+    anchors << -4.0f, -3.0f, 0.0f,
+                4.0f, -3.0f, 0.0f,
+               -4.0f,  3.0f, 0.0f,
+                4.0f,  3.0f, 0.0f,
+               -4.0f, -3.0f, 3.0f,
+                4.0f, -3.0f, 3.0f,
+               -4.0f,  3.0f, 3.0f,
+                4.0f,  3.0f, 3.0f;
+
+    std::vector<std::pair<int, int>> measurementAnchorIds;
+    for (int a = 0; a < 8; ++a) {
+        for (int b = a + 1; b < 8; ++b) {
+            measurementAnchorIds.push_back({a, b});
+        }
+    }
+    ASSERT_EQ(measurementAnchorIds.size(), 28u);
+    ASSERT_LE(measurementAnchorIds.size(), tdoa_estimator::kMaxCapacity);
+
+    tdoa_estimator::PosVector3D truePosition;
+    truePosition << 1.2f, -0.7f, 1.1f;
+
+    auto [anchorPositionsLeft, anchorPositionsRight, tdoas] =
+        calculateTrueTDOAs(anchors, measurementAnchorIds, truePosition);
+
+    tdoa_estimator::PosVector3D initialGuess = calculateInitialGuess(anchors);
+
+    auto result = tdoa_estimator::newtonRaphson(
+        anchorPositionsLeft, anchorPositionsRight, tdoas, initialGuess, 15);
+
+    Scalar error = (result.position - truePosition).norm();
+    std::cout << "8-anchor all-pairs err=" << error
+              << " iters=" << result.iterations << std::endl;
+
+    EXPECT_TRUE(result.valid);
+    EXPECT_LT(error, 0.05f);
+}
+
 TEST_F(TDOANewtonRaphsonTest, RealAnchorLayout3D) {
     tdoa_estimator::PosMatrix anchors(5, 3);
     anchors << 0.0f, 0.0f, 1.8f,

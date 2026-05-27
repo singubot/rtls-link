@@ -23,8 +23,6 @@ extern "C" {
 
 #include "utils/dispatcher.hpp"
 
-#define MAX_ANCHORS 6
-
 class UWBAnchorTDoA : public UWBBackend {
 public:
     UWBAnchorTDoA(const bsp::UWBConfig& uwb_config, UWBShortAddr shortAddr, uint16_t antennaDelay);
@@ -60,7 +58,7 @@ private:
     uwbConfig_t m_UwbConfig = {
         .mode = 0,  // Legacy used for chosing tdoa2 or 3.
         .address = {0,0,0,0,0,0,0xcf,0xbc}, // Index 0 will be anchor id
-        .anchorListSize = MAX_ANCHORS,
+        .anchorListSize = UWBParams::maxAnchorCount,
         .anchors = {},
         .position = {},
         .positionEnabled = true,
