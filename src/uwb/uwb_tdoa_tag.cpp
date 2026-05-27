@@ -196,6 +196,12 @@ static uint8_t applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors)
             invalid_config = true;
             break;
         }
+        if (!std::isfinite(anchor.x) || !std::isfinite(anchor.y) || !std::isfinite(anchor.z)) {
+            LOG_ERROR("Rejected static anchor config: non-finite coordinates for anchor id %u",
+                     static_cast<unsigned int>(anchorId));
+            invalid_config = true;
+            break;
+        }
         anchor_positions[anchorId] = anchor;
         configured_anchor_ids[anchorId] = true;
         max_anchor_id = std::max(max_anchor_id, anchorId);

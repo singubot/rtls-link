@@ -45,7 +45,15 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
     uint8_t configured = 0;
     bool invalid_config = false;
 
+    if (!std::isfinite(rotation_degrees)) {
+        LOG_ERROR("RTLSLink beacon rejected anchor config: non-finite rotation");
+        invalid_config = true;
+    }
+
     for (const auto& anchor_param : anchors) {
+        if (invalid_config) {
+            break;
+        }
         uint8_t anchor_id = 0;
         if (!ParseAnchorId(anchor_param.shortAddr, anchor_id) || anchor_id >= kMaxAnchors) {
             LOG_ERROR("RTLSLink beacon rejected anchor config: invalid id '%c%c'",
@@ -59,10 +67,24 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
             invalid_config = true;
             break;
         }
+        if (!std::isfinite(anchor_param.x)
+            || !std::isfinite(anchor_param.y)
+            || !std::isfinite(anchor_param.z)) {
+            LOG_ERROR("RTLSLink beacon rejected anchor config: non-finite coordinates for id %u",
+                     static_cast<unsigned int>(anchor_id));
+            invalid_config = true;
+            break;
+        }
 
         float x = anchor_param.x;
         float y = anchor_param.y;
         Rotate(rotation_degrees, x, y);
+        if (!std::isfinite(x) || !std::isfinite(y)) {
+            LOG_ERROR("RTLSLink beacon rejected anchor config: non-finite rotated coordinates for id %u",
+                     static_cast<unsigned int>(anchor_id));
+            invalid_config = true;
+            break;
+        }
 
         next_anchors[anchor_id] = {
             .id = anchor_id,
