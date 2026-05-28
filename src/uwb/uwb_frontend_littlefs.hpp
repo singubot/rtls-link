@@ -32,7 +32,7 @@ public:
 protected:
     void InitBackendForCurrentMode();
     void ApplyLoadedRuntimeConfig();
-    void ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon);
+    bool ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon);
     etl::vector<UWBAnchorParam, UWBParams::maxAnchorCount> GetAnchors();
 
     UWBBackend* m_Backend = nullptr;

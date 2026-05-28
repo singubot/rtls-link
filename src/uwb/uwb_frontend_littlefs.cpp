@@ -18,6 +18,9 @@
 
 namespace {
 
+UWBParams s_lastAcceptedStaticAnchors = {};
+bool s_hasLastAcceptedStaticAnchors = false;
+
 bool isStaticAnchorCommitParam(const char* name)
 {
     return strcmp(name, "anchorCount") == 0;
@@ -44,6 +47,74 @@ bool isRtlslinkRuntimeConfigParam(const char* name)
         || strcmp(name, "originAlt") == 0;
 }
 #endif
+
+bool isValidAnchorCountValue(const void* data)
+{
+    if (data == nullptr) {
+        return false;
+    }
+
+    uint32_t parsed = 0;
+    if (Utils::TransformStrToData(ParamType::UINT8,
+                                  static_cast<const char*>(data),
+                                  &parsed) != Utils::ErrorTransform::OK) {
+        return false;
+    }
+    if (parsed == 0 || parsed > UWBParams::maxAnchorCount) {
+        return false;
+    }
+
+    return true;
+}
+
+void copyStaticAnchorConfig(const UWBParams& from, UWBParams& to)
+{
+    to.anchorCount = from.anchorCount;
+    to.devId1 = from.devId1;
+    to.x1 = from.x1;
+    to.y1 = from.y1;
+    to.z1 = from.z1;
+    to.devId2 = from.devId2;
+    to.x2 = from.x2;
+    to.y2 = from.y2;
+    to.z2 = from.z2;
+    to.devId3 = from.devId3;
+    to.x3 = from.x3;
+    to.y3 = from.y3;
+    to.z3 = from.z3;
+    to.devId4 = from.devId4;
+    to.x4 = from.x4;
+    to.y4 = from.y4;
+    to.z4 = from.z4;
+    to.devId5 = from.devId5;
+    to.x5 = from.x5;
+    to.y5 = from.y5;
+    to.z5 = from.z5;
+    to.devId6 = from.devId6;
+    to.x6 = from.x6;
+    to.y6 = from.y6;
+    to.z6 = from.z6;
+    to.devId7 = from.devId7;
+    to.x7 = from.x7;
+    to.y7 = from.y7;
+    to.z7 = from.z7;
+    to.devId8 = from.devId8;
+    to.x8 = from.x8;
+    to.y8 = from.y8;
+    to.z8 = from.z8;
+}
+
+void rememberAcceptedStaticAnchorConfig(const UWBParams& params)
+{
+    copyStaticAnchorConfig(params, s_lastAcceptedStaticAnchors);
+    s_hasLastAcceptedStaticAnchors = true;
+}
+
+void restoreAcceptedStaticAnchorConfig(UWBParams& params, const UWBParams& fallback)
+{
+    copyStaticAnchorConfig(s_hasLastAcceptedStaticAnchors ? s_lastAcceptedStaticAnchors : fallback,
+                           params);
+}
 
 } // namespace
 
@@ -82,9 +153,11 @@ void UWBLittleFSFrontend::Init() {
         LOG_WARN("UWB backend disabled by parameter (uwb.uwbEnable=0)");
     } else {
         InitBackendForCurrentMode();
+        ApplyLoadedRuntimeConfig();
     }
 #else
     InitBackendForCurrentMode();
+    ApplyLoadedRuntimeConfig();
 #endif
 
     LOG_INFO("UWB frontend initialized");
@@ -108,13 +181,15 @@ void UWBLittleFSFrontend::ApplyLoadedRuntimeConfig()
     UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
 #endif
 
-    ApplyStaticAnchorsToLiveBackends(true, true);
+    if (ApplyStaticAnchorsToLiveBackends(true, true)) {
+        rememberAcceptedStaticAnchorConfig(m_Params);
+    }
 }
 
-void UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon)
+bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon)
 {
     if (m_Params.mode != UWBMode::TAG_TDOA) {
-        return;
+        return true;
     }
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
@@ -132,7 +207,7 @@ void UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
 #else
             (void)applyRtlslinkBeacon;
 #endif
-            return;
+            return true;
         }
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
@@ -165,16 +240,28 @@ void UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
     if (applyRtlslinkBeacon) {
         if (!estimatorApplied) {
             LOG_WARN("RTLSLink beacon static anchor config skipped - estimator apply failed");
-            return;
+            return false;
         }
         App::ConfigureRtlslinkBeaconAnchors(anchors);
     }
 #else
     (void)applyRtlslinkBeacon;
 #endif
+
+    return estimatorApplied;
 }
 
 ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uint32_t len) {
+    const bool staticAnchorCommit = isStaticAnchorCommitParam(name);
+    const UWBParams previousParams = m_Params;
+    if (staticAnchorCommit) {
+        if (!isValidAnchorCountValue(data)) {
+            LOG_ERROR("Rejected invalid UWB anchorCount (valid range 1-%u)",
+                      static_cast<unsigned int>(UWBParams::maxAnchorCount));
+            return ErrorParam::INVALID_DATA;
+        }
+    }
+
     ErrorParam result = LittleFSFrontend<UWBParams>::SetParam(name, data, len);
     if (result != ErrorParam::OK) {
         return result;
@@ -187,6 +274,7 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
         } else {
             LOG_INFO("UWB runtime enabled");
             InitBackendForCurrentMode();
+            ApplyLoadedRuntimeConfig();
         }
         return result;
     }
@@ -231,8 +319,17 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
             ApplyStaticAnchorsToLiveBackends(false, true);
         }
 #endif
-        if (isStaticAnchorCommitParam(name)) {
-            ApplyStaticAnchorsToLiveBackends(true, true);
+        if (staticAnchorCommit) {
+            if (!ApplyStaticAnchorsToLiveBackends(true, true)) {
+                LOG_ERROR("Rejected invalid UWB static anchor config; restoring previous accepted anchors");
+                restoreAcceptedStaticAnchorConfig(m_Params, previousParams);
+                const ErrorParam rollbackResult = SaveParams();
+                if (rollbackResult != ErrorParam::OK) {
+                    return rollbackResult;
+                }
+                return ErrorParam::INVALID_DATA;
+            }
+            rememberAcceptedStaticAnchorConfig(m_Params);
         } else if (isStaticAnchorGeometryParam(name)) {
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
             if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
