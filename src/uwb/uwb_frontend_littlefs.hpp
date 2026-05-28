@@ -23,6 +23,8 @@ public:
         return etl::string_view("uwb");
     }
 
+    void SetRuntimeEnabled(bool enabled);
+
     UWBParams& GetParams() {
         return m_Params;
     }
@@ -108,6 +110,9 @@ public:
         PARAM_DEF(UWBParams, smartPowerEnable),
         PARAM_DEF(UWBParams, tdoaSlotCount),
         PARAM_DEF(UWBParams, tdoaSlotDurationUs),
+        PARAM_DEF(UWBParams, tdoaAnchorTelemetryEnable),
+        PARAM_DEF(UWBParams, tdoaAnchorTelemetryIntervalMs),
+        PARAM_DEF(UWBParams, tdoaAnchorTelemetryPort),
 #ifdef ESP32S3_UWB_BOARD
         PARAM_DEF(UWBParams, tdoaMatcherPolicy),
 #endif

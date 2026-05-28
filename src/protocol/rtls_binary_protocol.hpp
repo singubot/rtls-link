@@ -20,6 +20,7 @@ enum class FrameType : uint8_t {
     Heartbeat = 16,
     LogMessage = 17,
     TdoaEstimatorStatus = 32,
+    TdoaAnchorStats = 33,
 };
 
 enum class StatusCode : uint8_t {

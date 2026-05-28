@@ -70,15 +70,28 @@ public:
 private:
     void SendHeartbeat();
     uint8_t ModeToRoleId(uint8_t mode);
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    void UpdateAnchorTelemetry();
+    uint16_t GetAnchorTelemetryIntervalMs() const;
+    void SendAnchorTelemetry();
+#endif
 
 private:
     static constexpr uint32_t kHeartbeatIntervalMs = 2000; // 2 seconds
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    static constexpr uint16_t kAnchorTelemetryMinIntervalMs = 250;
+    static constexpr uint16_t kAnchorTelemetryMaxIntervalMs = 60000;
+#endif
 
     WiFiUDP m_Udp;
     uint16_t m_Port;
     const WifiParams& m_WifiParams;
     uint32_t m_LastHeartbeat = 0;
     TelemetryCallback m_TelemetryCallback;
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    uint32_t m_LastAnchorTelemetryMs = 0;
+    bool m_AnchorTelemetrySendWarned = false;
+#endif
 };
 
 #endif // USE_WIFI_DISCOVERY

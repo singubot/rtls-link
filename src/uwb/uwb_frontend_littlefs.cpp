@@ -216,7 +216,8 @@ ErrorParam UWBLittleFSFrontend::LoadParams() {
         }
 #endif
 #ifdef USE_UWB_MODE_TDOA_TAG
-        if (m_Params.mode == UWBMode::TAG_TDOA && !UWBTagTDoA::ValidateStaticAnchors(GetAnchors())) {
+        auto anchors = GetAnchors();
+        if (m_Params.mode == UWBMode::TAG_TDOA && !UWBTagTDoA::ValidateStaticAnchors(anchors)) {
             LOG_ERROR("Rejected stored UWB params with invalid TAG_TDOA anchor geometry");
             m_Params = previousParams;
             return ErrorParam::INVALID_DATA;
@@ -285,7 +286,8 @@ bool UWBLittleFSFrontend::RestoreTagRuntimeState(const UWBParams& params,
 bool UWBLittleFSFrontend::ApplyTagRuntimeAnchorsTransaction(bool applyEstimator, bool applyRtlslinkBeacon)
 {
 #ifdef USE_UWB_MODE_TDOA_TAG
-    if (applyEstimator && !UWBTagTDoA::ValidateStaticAnchors(GetAnchors())) {
+    auto anchors = GetAnchors();
+    if (applyEstimator && !UWBTagTDoA::ValidateStaticAnchors(anchors)) {
         return false;
     }
 #else
@@ -390,6 +392,23 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
     return estimatorApplied;
 }
 
+void UWBLittleFSFrontend::SetRuntimeEnabled(bool enabled) {
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+    m_Params.uwbEnable = enabled ? 1 : 0;
+
+    if (m_Backend != nullptr) {
+        m_Backend->SetEnabled(enabled);
+        return;
+    }
+
+    if (enabled) {
+        InitBackendForCurrentMode();
+    }
+#else
+    (void)enabled;
+#endif
+}
+
 ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uint32_t len) {
     const bool staticAnchorCommit = isStaticAnchorCommitParam(name);
     const UWBParams previousParams = m_Params;
@@ -431,9 +450,10 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
     if (strcmp(name, "uwbEnable") == 0) {
         if (m_Params.uwbEnable == 0) {
             LOG_INFO("UWB runtime disabled");
+            SetRuntimeEnabled(false);
         } else {
             LOG_INFO("UWB runtime enabled");
-            InitBackendForCurrentMode();
+            SetRuntimeEnabled(true);
             ApplyLoadedRuntimeConfig();
         }
         return result;
