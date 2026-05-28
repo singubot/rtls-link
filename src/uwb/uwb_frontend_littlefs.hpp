@@ -33,6 +33,7 @@ public:
 
 protected:
     void InitBackendForCurrentMode();
+    bool HasBackendModeMismatch() const;
     bool ApplyLoadedRuntimeConfig();
     bool RestoreTagRuntimeState(const UWBParams& params,
                                 bool restoreEstimator,
@@ -44,6 +45,7 @@ protected:
     etl::vector<UWBAnchorParam, UWBParams::maxAnchorCount> GetAnchors();
 
     UWBBackend* m_Backend = nullptr;
+    UWBMode m_BackendMode = UWBMode::UNKNOWN;
 
 public:
     static constexpr ParamDef s_ParamDefs[] = {

@@ -101,6 +101,27 @@ bool isValidAnchorCountValue(const void* data)
     return true;
 }
 
+bool parseUwbModeValue(const void* data, UWBMode& outMode)
+{
+    if (data == nullptr) {
+        return false;
+    }
+
+    uint32_t parsed = 0;
+    if (Utils::TransformStrToData(ParamType::UINT8,
+                                  static_cast<const char*>(data),
+                                  &parsed) != Utils::ErrorTransform::OK) {
+        return false;
+    }
+    if (parsed != static_cast<uint8_t>(UWBMode::ANCHOR_TDOA)
+        && parsed != static_cast<uint8_t>(UWBMode::TAG_TDOA)) {
+        return false;
+    }
+
+    outMode = static_cast<UWBMode>(parsed);
+    return true;
+}
+
 void copyStaticAnchorConfig(const UWBParams& from, UWBParams& to)
 {
     to.anchorCount = from.anchorCount;
@@ -176,6 +197,14 @@ void UWBLittleFSFrontend::InitBackendForCurrentMode() {
         LOG_ERROR("Unknown UWB mode");
         break;
     }
+    if (m_Backend != nullptr) {
+        m_BackendMode = m_Params.mode;
+    }
+}
+
+bool UWBLittleFSFrontend::HasBackendModeMismatch() const
+{
+    return m_Backend != nullptr && m_BackendMode != m_Params.mode;
 }
 
 void UWBLittleFSFrontend::Init() {
@@ -412,6 +441,10 @@ bool UWBLittleFSFrontend::SetRuntimeEnabled(bool enabled) {
     m_Params.uwbEnable = enabled ? 1 : 0;
 
     if (m_Backend != nullptr) {
+        if (enabled && HasBackendModeMismatch()) {
+            LOG_ERROR("UWB backend mode change requires reboot before runtime can be enabled");
+            return false;
+        }
         m_Backend->SetEnabled(enabled);
         return true;
     }
@@ -435,6 +468,17 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
         if (!isValidAnchorCountValue(data)) {
             LOG_ERROR("Rejected invalid UWB anchorCount (valid range 1-%u)",
                       static_cast<unsigned int>(UWBParams::maxAnchorCount));
+            return ErrorParam::INVALID_DATA;
+        }
+    }
+    if (strcmp(name, "mode") == 0) {
+        UWBMode requestedMode = UWBMode::UNKNOWN;
+        if (!parseUwbModeValue(data, requestedMode)) {
+            LOG_ERROR("Rejected invalid UWB mode");
+            return ErrorParam::INVALID_DATA;
+        }
+        if (m_Backend != nullptr && requestedMode != m_BackendMode) {
+            LOG_ERROR("Rejected UWB mode change; backend mode changes require reboot");
             return ErrorParam::INVALID_DATA;
         }
     }
