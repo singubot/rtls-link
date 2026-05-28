@@ -65,6 +65,28 @@ bool parseFiniteFloatStrict(String value)
     return true;
 }
 
+bool parseFiniteDoubleStrict(String value)
+{
+    value.trim();
+    if (value.length() == 0) {
+        return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const double parsed = strtod(value.c_str(), &end);
+    if (end == value.c_str() || errno == ERANGE || !std::isfinite(parsed)) {
+        return false;
+    }
+    while (end != nullptr && *end != '\0') {
+        if (!isspace(static_cast<unsigned char>(*end))) {
+            return false;
+        }
+        end++;
+    }
+    return true;
+}
+
 bool parseAnchorSlotParam(const String& paramName, char prefix, uint8_t& outSlot)
 {
     if (paramName.length() != 2 || paramName.charAt(0) != prefix) {
@@ -103,7 +125,8 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
     bool tagTdoaMode = false;
     bool anchorCountPresent = false;
     uint8_t anchorCount = 0;
-    bool valid = true;
+    bool tagAnchorConfigValid = true;
+    bool rtlslinkRuntimeConfigValid = true;
 
     while (file.available()) {
         String line = file.readStringUntil('\n');
@@ -143,7 +166,7 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
         if (paramName == "anchorCount") {
             uint8_t parsed = 0;
             if (!parseU8Strict(value, parsed) || parsed > kMaxConfigAnchors) {
-                valid = false;
+                tagAnchorConfigValid = false;
                 continue;
             }
             anchorCountPresent = true;
@@ -155,7 +178,7 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
         if (parseAnchorDevIdParam(paramName, slot)) {
             uint8_t devId = 0;
             if (!parseU8Strict(value, devId) || devId >= kMaxConfigAnchors) {
-                valid = false;
+                tagAnchorConfigValid = false;
                 continue;
             }
             anchors[slot].devIdPresent = true;
@@ -163,31 +186,47 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
             continue;
         }
 
+        if (paramName == "rotationDegrees" || paramName == "originAlt") {
+            rtlslinkRuntimeConfigValid = parseFiniteFloatStrict(value)
+                && rtlslinkRuntimeConfigValid;
+            continue;
+        }
+        if (paramName == "originLat" || paramName == "originLon") {
+            rtlslinkRuntimeConfigValid = parseFiniteDoubleStrict(value)
+                && rtlslinkRuntimeConfigValid;
+            continue;
+        }
+
         if (parseAnchorSlotParam(paramName, 'x', slot)) {
             anchors[slot].xPresent = parseFiniteFloatStrict(value);
-            valid = anchors[slot].xPresent;
+            tagAnchorConfigValid = anchors[slot].xPresent && tagAnchorConfigValid;
             continue;
         }
         if (parseAnchorSlotParam(paramName, 'y', slot)) {
             anchors[slot].yPresent = parseFiniteFloatStrict(value);
-            valid = anchors[slot].yPresent;
+            tagAnchorConfigValid = anchors[slot].yPresent && tagAnchorConfigValid;
             continue;
         }
         if (parseAnchorSlotParam(paramName, 'z', slot)) {
             anchors[slot].zPresent = parseFiniteFloatStrict(value);
-            valid = anchors[slot].zPresent;
+            tagAnchorConfigValid = anchors[slot].zPresent && tagAnchorConfigValid;
             continue;
         }
     }
 
     file.close();
 
+    if (!rtlslinkRuntimeConfigValid) {
+        LOG_ERROR("ConfigManager: Config %s has non-finite RTLSLink runtime parameters", path);
+        return ConfigError::INVALID_CONFIG;
+    }
+
     if (!tagTdoaMode) {
         return ConfigError::OK;
     }
 
-    if (!valid || !anchorCountPresent || anchorCount == 0) {
-        if (valid) {
+    if (!tagAnchorConfigValid || !anchorCountPresent || anchorCount == 0) {
+        if (tagAnchorConfigValid) {
             LOG_ERROR("ConfigManager: Config %s missing positive UWB anchorCount", path);
         }
         return ConfigError::INVALID_CONFIG;
@@ -525,6 +564,9 @@ ConfigError ConfigManager::LoadConfigNamed(const char* name) {
     ErrorParam loadResult = Front::LoadAllParams();
     if (loadResult != ErrorParam::OK && loadResult != ErrorParam::FILE_NOT_FOUND) {
         LOG_WARN("ConfigManager: Failed to reload parameters after loading config");
+        if (loadResult == ErrorParam::INVALID_DATA) {
+            return ConfigError::INVALID_CONFIG;
+        }
         return ConfigError::FILE_SYSTEM_ERROR;
     }
 

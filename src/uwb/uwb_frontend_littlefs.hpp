@@ -31,7 +31,9 @@ public:
 
 protected:
     void InitBackendForCurrentMode();
-    void ApplyLoadedRuntimeConfig();
+    bool ApplyLoadedRuntimeConfig();
+    bool ApplyTagRuntimeAnchorsTransaction(bool applyEstimator, bool applyRtlslinkBeacon);
+    bool ClearRtlslinkBeaconAnchors();
     bool ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon);
     etl::vector<UWBAnchorParam, UWBParams::maxAnchorCount> GetAnchors();
 

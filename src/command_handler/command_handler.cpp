@@ -1187,6 +1187,9 @@ static void loadConfigNamedCallback(cmd* c)
         case ConfigError::FILE_SYSTEM_ERROR:
             commandResult = "{\"success\":false,\"error\":\"File system error\"}";
             break;
+        case ConfigError::INVALID_CONFIG:
+            commandResult = "{\"success\":false,\"error\":\"Invalid configuration\"}";
+            break;
         default:
             commandResult = "{\"success\":false,\"error\":\"Unknown error\"}";
             break;
