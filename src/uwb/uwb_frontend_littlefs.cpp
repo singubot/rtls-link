@@ -118,20 +118,34 @@ void UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
     }
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
-    if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
-        if (applyEstimator) {
-            LOG_INFO("Static anchor config saved; dynamic anchor positioning is active");
+    const bool dynamicParamEnabled = (m_Params.dynamicAnchorPosEnabled != 0);
+    const bool dynamicRunning = UWBTagTDoA::IsDynamicPositioningEnabled();
+    if (dynamicParamEnabled && dynamicRunning) {
+        if (UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
+            if (applyEstimator) {
+                LOG_INFO("Static anchor config saved; dynamic anchor positioning is active");
+            }
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+            if (applyRtlslinkBeacon) {
+                UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors();
+            }
+#else
+            (void)applyRtlslinkBeacon;
+#endif
+            return;
         }
+
 #ifdef USE_RTLSLINK_BEACON_BACKEND
         if (applyRtlslinkBeacon) {
-            UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors();
+            LOG_INFO("RTLSLink beacon waiting for dynamic anchor positions");
+            applyRtlslinkBeacon = false;
         }
-#else
-        (void)applyRtlslinkBeacon;
 #endif
-        return;
+        if (applyEstimator) {
+            LOG_INFO("Static anchor config saved; dynamic anchor positioning is pending");
+        }
     }
-    if (m_Params.dynamicAnchorPosEnabled != 0 && applyEstimator) {
+    if (dynamicParamEnabled && !dynamicRunning && applyEstimator) {
         LOG_INFO("Dynamic anchor positioning requires reboot; applying static anchors live until reboot");
     }
 #endif
