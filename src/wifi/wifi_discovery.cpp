@@ -8,6 +8,11 @@
 #include "logging/logging.hpp"
 #include "protocol/rtls_binary_protocol.hpp"
 
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+#include "anchor/tdoa_anchor_api.h"
+#include "protocol/tdoa_anchor_stats_frame.hpp"
+#endif
+
 #include <esp_mac.h>
 
 WifiDiscovery::WifiDiscovery(uint16_t port, const WifiParams& wifiParams)
@@ -22,6 +27,10 @@ void WifiDiscovery::SetTelemetryCallback(TelemetryCallback callback) {
 }
 
 void WifiDiscovery::Update() {
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    UpdateAnchorTelemetry();
+#endif
+
     // Send heartbeat at interval
     uint32_t now = millis();
     if (now - m_LastHeartbeat < kHeartbeatIntervalMs) {
@@ -139,6 +148,71 @@ void WifiDiscovery::SendHeartbeat() {
     m_Udp.write(frame.Data(), frame.Size());
     m_Udp.endPacket();
 }
+
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+void WifiDiscovery::UpdateAnchorTelemetry() {
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+    if (uwbParams.mode != UWBMode::ANCHOR_TDOA ||
+        uwbParams.uwbEnable == 0 ||
+        uwbParams.tdoaAnchorTelemetryEnable == 0 ||
+        uwbParams.tdoaAnchorTelemetryPort == 0) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (now - m_LastAnchorTelemetryMs < GetAnchorTelemetryIntervalMs()) {
+        return;
+    }
+    m_LastAnchorTelemetryMs = now;
+
+    SendAnchorTelemetry();
+}
+
+uint16_t WifiDiscovery::GetAnchorTelemetryIntervalMs() const {
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+    if (uwbParams.tdoaAnchorTelemetryIntervalMs < kAnchorTelemetryMinIntervalMs) {
+        return kAnchorTelemetryMinIntervalMs;
+    }
+    if (uwbParams.tdoaAnchorTelemetryIntervalMs > kAnchorTelemetryMaxIntervalMs) {
+        return kAnchorTelemetryMaxIntervalMs;
+    }
+    return uwbParams.tdoaAnchorTelemetryIntervalMs;
+}
+
+void WifiDiscovery::SendAnchorTelemetry() {
+    IPAddress gcsIp;
+    if (!gcsIp.fromString(m_WifiParams.gcsIp.data())) {
+        return;
+    }
+
+    uwbTdoa2AnchorStats_t stats = {};
+    if (!uwbTdoa2AnchorGetStats(&stats)) {
+        return;
+    }
+
+    rtls::protocol::BinaryFrameBuilder<512> frame;
+    rtls::protocol::AppendTdoaAnchorStatsFrame(frame, stats);
+
+    static bool truncationWarned = false;
+    if (frame.Truncated() && !truncationWarned) {
+        LOG_WARN("WifiDiscovery: anchor telemetry frame truncated");
+        truncationWarned = true;
+    }
+
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+    const int beginResult = m_Udp.beginPacket(gcsIp, uwbParams.tdoaAnchorTelemetryPort);
+    const size_t bytesWritten = beginResult ? m_Udp.write(frame.Data(), frame.Size()) : 0;
+    const int endResult = beginResult ? m_Udp.endPacket() : 0;
+    if ((!beginResult || bytesWritten != frame.Size() || !endResult) && !m_AnchorTelemetrySendWarned) {
+        LOG_WARN("WifiDiscovery: anchor telemetry UDP send failed begin=%d written=%u/%u end=%d",
+                 beginResult,
+                 static_cast<unsigned int>(bytesWritten),
+                 static_cast<unsigned int>(frame.Size()),
+                 endResult);
+        m_AnchorTelemetrySendWarned = true;
+    }
+}
+#endif
 
 uint8_t WifiDiscovery::ModeToRoleId(uint8_t mode) {
     switch (mode) {

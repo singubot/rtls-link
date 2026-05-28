@@ -18,7 +18,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define UWB_TDOA2_ANCHOR_STATS_VERSION 1
+#define UWB_TDOA2_ANCHOR_STATS_VERSION 2
 #define UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT 8
 
 typedef struct uwbTdoa2AnchorSlotStats_s {
@@ -51,6 +51,19 @@ typedef struct uwbTdoa2AnchorStats_s {
   uint32_t stallResets;
   uint32_t txScheduled;
   uint32_t txDone;
+  uint32_t irqCount;
+  uint32_t irqToServiceLastUs;
+  uint32_t irqToServiceMaxUs;
+  uint32_t dwHandleInterruptLastUs;
+  uint32_t dwHandleInterruptMaxUs;
+  uint32_t uwbHardPathLastUs;
+  uint32_t uwbHardPathMaxUs;
+  uint32_t slotSlackMinUs;
+  uint32_t rxArmLateCount;
+  uint32_t txArmLateCount;
+  uint32_t missedDeadlineCount;
+  uint32_t guardedTxCount;
+  uint32_t lastDwStatusBeforeStall;
   uint8_t packetIds[UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT];
   uint16_t distances[UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT];
   uwbTdoa2AnchorSlotStats_t slots[UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT];
@@ -81,6 +94,26 @@ bool uwbTdoa2AnchorGetStats(uwbTdoa2AnchorStats_t* out_stats);
  * @brief Record a wrapper-level stall watchdog reset in anchor diagnostics.
  */
 void uwbTdoa2AnchorRecordStallReset(void);
+
+/**
+ * @brief Record wrapper-level interrupt service timing.
+ */
+void uwbTdoa2AnchorRecordIrqService(uint32_t irq_count, uint32_t latency_us);
+
+/**
+ * @brief Record DW1000 interrupt handler duration.
+ */
+void uwbTdoa2AnchorRecordDwHandleInterrupt(uint32_t duration_us);
+
+/**
+ * @brief Record time spent dispatching the hard TDoA radio path.
+ */
+void uwbTdoa2AnchorRecordHardPath(uint32_t duration_us);
+
+/**
+ * @brief Record the latest DW1000 SYS_STATUS value before wrapper recovery.
+ */
+void uwbTdoa2AnchorRecordLastDwStatusBeforeStall(uint32_t status);
 
 /**
  * @brief Get the current anchor ID (0..7) used by the TDMA schedule.

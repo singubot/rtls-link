@@ -78,6 +78,9 @@ static constexpr uint64_t kDelayedTxRxAlignMask = (1ull << 9) - 1;
 // Represented as a rational to avoid floating point: 63897.6 = 638976 / 10
 static constexpr uint64_t kDwTicksPerUsNum = 638976;
 static constexpr uint64_t kDwTicksPerUsDen = 10;
+static constexpr uint64_t kDwTimestampMask = (1ULL << 40) - 1;
+static constexpr uint64_t kDwTimestampHalfWrap = 1ULL << 39;
+static constexpr uint32_t kSlotSlackNoSampleUs = 0xffffffffu;
 
 static uint64_t usToDwTicks(uint32_t us)
 {
@@ -128,10 +131,40 @@ static uint32_t dwTicksToUs(uint64_t ticks)
   return static_cast<uint32_t>((ticks * kDwTicksPerUsDen + (kDwTicksPerUsNum / 2)) / kDwTicksPerUsNum);
 }
 
+static uint64_t wrapDwTime(uint64_t time)
+{
+  return time & kDwTimestampMask;
+}
+
+static int64_t signedDwTimeDiff(uint64_t target, uint64_t reference)
+{
+  const uint64_t forwardDiff = (target - reference) & kDwTimestampMask;
+  if (forwardDiff >= kDwTimestampHalfWrap) {
+    return -static_cast<int64_t>((reference - target) & kDwTimestampMask);
+  }
+  return static_cast<int64_t>(forwardDiff);
+}
+
 static void inc32(uint32_t& value)
 {
   if (value < 0xffffffffu) {
     value++;
+  }
+}
+
+static void add32(uint32_t& value, uint32_t amount)
+{
+  if (0xffffffffu - value < amount) {
+    value = 0xffffffffu;
+  } else {
+    value += amount;
+  }
+}
+
+static void max32(uint32_t& value, uint32_t sample)
+{
+  if (sample > value) {
+    value = sample;
   }
 }
 
@@ -258,6 +291,43 @@ static dwTime_t transmitTimeForSlot(int slot)
   return transmitTime;
 }
 
+static uint64_t transmitPhaseForAlignedFrameStart(int slot)
+{
+  dwTime_t phase = { .full = 0 };
+
+  // Slot length and frame length are aligned to 512 DW ticks. Compute the
+  // known TX phase directly instead of taking modulo on a truncated timestamp.
+  phase.full = static_cast<uint64_t>(slot) * ctx.slotLen;
+  phase.full += TDMA_GUARD_LENGTH;
+  phase.full += PREAMBLE_LENGTH;
+  adjustTxRxTime(&phase);
+
+  return phase.full;
+}
+
+static void recordArmMargin(dwDevice_t* dev, const dwTime_t& targetTime, bool tx)
+{
+  dwTime_t now = { .full = 0 };
+  dwGetSystemTimestamp(dev, &now);
+
+  const int64_t marginTicks = signedDwTimeDiff(targetTime.full, now.full);
+  if (marginTicks <= 0) {
+    inc32(ctx.stats.missedDeadlineCount);
+    if (tx) {
+      inc32(ctx.stats.txArmLateCount);
+    } else {
+      inc32(ctx.stats.rxArmLateCount);
+    }
+    ctx.stats.slotSlackMinUs = 0;
+    return;
+  }
+
+  const uint32_t marginUs = dwTicksToUs(static_cast<uint64_t>(marginTicks));
+  if (marginUs < ctx.stats.slotSlackMinUs) {
+    ctx.stats.slotSlackMinUs = marginUs;
+  }
+}
+
 static void handleFailedRx(dwDevice_t *dev)
 {
   (void)dev;
@@ -341,10 +411,11 @@ static void handleRxPacket(dwDevice_t *dev)
   // Resync TDMA and save useful anchor 0 information
   if (ctx.slot == 0) {
     ctx.slot0MissCount = 0;
-    // Resync local frame start to packet from anchor 0
-    dwTime_t pkTxTime = { .full = 0 };
-    memcpy(&pkTxTime, rangePacket->timestamps[ctx.slot], TS_TX_SIZE);
-    ctx.tdmaFrameStart.full = rxTime.full - (pkTxTime.full - tdmaLastFrame(pkTxTime.full));
+
+    // Resync local frame start to packet from anchor 0. The previous
+    // implementation used low32 % frameLen, which is only valid when frameLen
+    // divides the DW1000 32-bit timestamp wrap period.
+    ctx.tdmaFrameStart.full = wrapDwTime(rxTime.full - transmitPhaseForAlignedFrameStart(0));
 
     //TODO: Save relevant data to calculate masterTime
   }
@@ -358,6 +429,7 @@ static void setupRx(dwDevice_t *dev)
   // Calculate start of the slot
   receiveTime.full = ctx.tdmaFrameStart.full + static_cast<uint64_t>(ctx.nextSlot) * ctx.slotLen;
   adjustTxRxTime(&receiveTime);
+  recordArmMargin(dev, receiveTime, false);
 
   dwSetReceiveWaitTimeout(dev, RECEIVE_TIMEOUT);
   dwWriteSystemConfigurationRegister(dev);
@@ -407,6 +479,7 @@ static void setupTx(dwDevice_t *dev)
   dwTime_t txTime = transmitTimeForSlot(ctx.nextSlot);
   ctx.txTimestamps[ctx.anchorId] = txTime.low32;
   inc32(ctx.stats.txScheduled);
+  recordArmMargin(dev, txTime, true);
 
   dwNewTransmit(dev);
   dwSetDefaults(dev);
@@ -537,6 +610,7 @@ static void tdoa2Init(uwbConfig_t * config, dwDevice_t *dev)
 
   if (!s_initialized) {
     memset(&ctx.stats, 0, sizeof(ctx.stats));
+    ctx.stats.slotSlackMinUs = kSlotSlackNoSampleUs;
   }
   refreshStatsSnapshot();
 
@@ -654,6 +728,46 @@ extern "C" void uwbTdoa2AnchorRecordStallReset(void)
 
   inc32(ctx.stats.stallResets);
   inc32(ctx.stats.resyncs);
+}
+
+extern "C" void uwbTdoa2AnchorRecordIrqService(uint32_t irq_count, uint32_t latency_us)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  add32(ctx.stats.irqCount, irq_count);
+  ctx.stats.irqToServiceLastUs = latency_us;
+  max32(ctx.stats.irqToServiceMaxUs, latency_us);
+}
+
+extern "C" void uwbTdoa2AnchorRecordDwHandleInterrupt(uint32_t duration_us)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  ctx.stats.dwHandleInterruptLastUs = duration_us;
+  max32(ctx.stats.dwHandleInterruptMaxUs, duration_us);
+}
+
+extern "C" void uwbTdoa2AnchorRecordHardPath(uint32_t duration_us)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  ctx.stats.uwbHardPathLastUs = duration_us;
+  max32(ctx.stats.uwbHardPathMaxUs, duration_us);
+}
+
+extern "C" void uwbTdoa2AnchorRecordLastDwStatusBeforeStall(uint32_t status)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  ctx.stats.lastDwStatusBeforeStall = status;
 }
 
 extern "C" uint8_t uwbTdoa2AnchorGetAnchorId(void)

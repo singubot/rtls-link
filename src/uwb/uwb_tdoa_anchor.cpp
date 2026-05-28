@@ -9,6 +9,7 @@
 #include "uwb_frontend_littlefs.hpp"
 #include "dw1000_radio_config.hpp"
 #include "tdoa_common.hpp"
+#include "scheduler.hpp"
 
 #include "SPI.h"
 
@@ -21,12 +22,33 @@ static FAST_CODE void txCallback(dwDevice_t *dev);
 static FAST_CODE void rxCallback(dwDevice_t *dev);
 static FAST_CODE void rxTimeoutCallback(dwDevice_t *dev);
 static FAST_CODE void rxFailedCallback(dwDevice_t *dev);
+static void anchorRadioTaskEntry();
 
-static volatile bool isr_flag = false;
+static UWBAnchorTDoA* s_anchorInstance = nullptr;
+static TaskHandle_t s_anchorRadioTaskHandle = nullptr;
+static portMUX_TYPE s_irqStatsMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t s_pendingIrqCount = 0;
+static volatile uint32_t s_firstPendingIrqUs = 0;
+
+// AsyncTCP runs at priority 3 by default. Keep the radio task below it so
+// OTA/WebSocket traffic can complete even when UWB IRQs are dense.
+static constexpr uint32_t kAnchorRadioTaskPriority = 2;
+
+static StaticTaskHolder<etl::delegate<void()>, 4096, TaskType::CONTINUOUS> anchor_radio_task = {
+    "UwbAnchorTask",
+    0,
+    kAnchorRadioTaskPriority,
+    etl::delegate<void()>(),
+    {},
+    {}
+};
 
 UWBAnchorTDoA::UWBAnchorTDoA(const bsp::UWBConfig& uwb_config, UWBShortAddr shortAddr, uint16_t antennaDelay)
     : UWBBackend(uwb_config)
 {
+    s_anchorInstance = this;
+    m_interruptPin = uwb_config.pins.int_pin;
+
     // NOTE: Look into short data fast accuracy...
     // Using a lambda to attach the class method as an interrupt handler
 
@@ -95,57 +117,235 @@ UWBAnchorTDoA::UWBAnchorTDoA(const bsp::UWBConfig& uwb_config, UWBShortAddr shor
     // Init the tdoa anchor algorithm
     uwbTdoa2Algorithm.init(&m_UwbConfig, &m_Device);
 
-    attachInterrupt(digitalPinToInterrupt(uwb_config.pins.int_pin),
-        anchorInterruptISR, RISING);
+    anchor_radio_task.taskFunction = etl::delegate<void()>::create<&anchorRadioTaskEntry>();
+    Scheduler::scheduler.CreateStaticPinnedTask(anchor_radio_task, UWB_TASK_CORE_ID);
+    s_anchorRadioTaskHandle = anchor_radio_task.handle;
+
+    AttachInterruptHandler();
 
     vTaskDelay(pdMS_TO_TICKS(300));
 
-    uwbTdoa2Algorithm.onEvent(&m_Device, uwbEvent_t::eventTimeout);
+    KickStartRadio();
+}
+
+static void anchorRadioTaskEntry()
+{
+    if (s_anchorInstance != nullptr) {
+        s_anchorInstance->RadioTask();
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 
 void UWBAnchorTDoA::Update()
 {
-    while (isr_flag) {
-        // Clear the flag before handling the interrupt to avoid losing a new
-        // interrupt that arrives during dwHandleInterrupt().
-        isr_flag = false;
-        dwHandleInterrupt(&m_Device);
-        m_lastEventTimeMs = millis();
+    // DW1000 event servicing is owned by RadioTask(). Keeping Update() empty
+    // avoids a second loop-polled path touching radio state.
+}
+
+void UWBAnchorTDoA::SetEnabled(bool enabled)
+{
+    if (enabled == m_radioEnabled) {
+        return;
     }
 
-    // Stall watchdog: if no DW1000 interrupt for longer than several TDMA
-    // frame periods, the radio is stuck (e.g. failed delayed TX/RX).
-    // Force idle and trigger resync.
-    uint32_t now = millis();
-    if (m_lastEventTimeMs != 0 && (now - m_lastEventTimeMs) > STALL_TIMEOUT_MS) {
-        LOG_WARN("UWB stall detected (%lu ms without interrupt), reinitializing",
-                 (unsigned long)(now - m_lastEventTimeMs));
-        dwIdle(&m_Device);
-        uwbTdoa2AnchorRecordStallReset();
-        // Full reinit: resets FSM to syncTdmaState and clears stale
-        // timestamps so the resync path computes timing from the current
-        // DW1000 system clock (not the stale TDMA frame start).
-        uwbTdoa2Algorithm.init(&m_UwbConfig, &m_Device);
+    m_radioEnabled = enabled;
+
+    if (!enabled) {
+        DetachInterruptHandler();
+        ClearPendingInterruptAccounting();
+        LOG_INFO("UWB anchor radio suspend requested");
+    } else {
+        if (!m_radioSuspended) {
+            AttachInterruptHandler();
+            m_startRequested = true;
+        }
+        LOG_INFO("UWB anchor radio resume requested");
+    }
+
+    if (s_anchorRadioTaskHandle != nullptr) {
+        xTaskNotifyGive(s_anchorRadioTaskHandle);
+    }
+}
+
+void UWBAnchorTDoA::RadioTask()
+{
+    const uint32_t notifyCount = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(UWB_TASK_WAIT_MS));
+    uint32_t irqNotifyCount = notifyCount;
+
+    if (!m_radioEnabled) {
+        SuspendRadio();
+        return;
+    }
+
+    if (m_radioSuspended) {
+        ResumeRadio();
+    }
+
+    if (m_startRequested) {
+        m_startRequested = false;
         uwbTdoa2Algorithm.onEvent(&m_Device, uwbEvent_t::eventTimeout);
-        m_lastEventTimeMs = now;
+        m_lastEventTimeMs = millis();
+        if (irqNotifyCount > 0) {
+            irqNotifyCount--;
+        }
     }
 
-    // If the antenna delay parameter is updated at runtime (via the websocket
-    // param interface), propagate it to the TDoA anchor algorithm immediately
-    // so it is reflected in outgoing packets without requiring a reboot.
-    const uint16_t desiredDelay = Front::uwbLittleFSFront.GetParams().ADelay;
-    if (desiredDelay != m_broadcastAntennaDelay) {
-        m_broadcastAntennaDelay = desiredDelay;
-        m_UwbConfig.antennaDelay = desiredDelay;
-        uwbTdoa2AnchorSetAntennaDelay(desiredDelay);
-        LOG_INFO("Updated broadcast antenna delay: %u", static_cast<unsigned int>(desiredDelay));
+    if (irqNotifyCount > 0) {
+        ServicePendingInterrupts(irqNotifyCount);
+
+        uint32_t extraNotifyCount = 0;
+        while ((extraNotifyCount = ulTaskNotifyTake(pdTRUE, 0)) > 0) {
+            ServicePendingInterrupts(extraNotifyCount);
+        }
     }
 
+    CheckStallWatchdog();
+    ApplyRuntimeParams();
+}
+
+void UWBAnchorTDoA::ServicePendingInterrupts(uint32_t notifyCount)
+{
+    uint32_t pendingIrqCount = 0;
+    uint32_t firstPendingIrqUs = 0;
+
+    portENTER_CRITICAL(&s_irqStatsMux);
+    pendingIrqCount = s_pendingIrqCount;
+    firstPendingIrqUs = s_firstPendingIrqUs;
+    s_pendingIrqCount = 0;
+    s_firstPendingIrqUs = 0;
+    portEXIT_CRITICAL(&s_irqStatsMux);
+
+    if (pendingIrqCount == 0) {
+        pendingIrqCount = notifyCount;
+    }
+
+    if (firstPendingIrqUs != 0) {
+        uwbTdoa2AnchorRecordIrqService(pendingIrqCount, micros() - firstPendingIrqUs);
+    } else {
+        uwbTdoa2AnchorRecordIrqService(pendingIrqCount, 0);
+    }
+
+    for (uint32_t i = 0; i < notifyCount; i++) {
+        const uint32_t handleStartUs = micros();
+        dwHandleInterrupt(&m_Device);
+        uwbTdoa2AnchorRecordDwHandleInterrupt(micros() - handleStartUs);
+        m_lastEventTimeMs = millis();
+        DispatchPendingEvents();
+    }
+}
+
+void UWBAnchorTDoA::DispatchPendingEvents()
+{
     if (m_DwData.interrupt_flags != 0) {
+        const uint32_t hardStartUs = micros();
         AnchorTDoADispatcher dispatcher(this);
         dispatcher.Dispatch(static_cast<libDw1000::IsrFlags>(m_DwData.interrupt_flags));
+        uwbTdoa2AnchorRecordHardPath(micros() - hardStartUs);
     }
+}
+
+void UWBAnchorTDoA::CheckStallWatchdog()
+{
+    const uint32_t now = millis();
+    if (m_lastEventTimeMs == 0 || (now - m_lastEventTimeMs) <= STALL_TIMEOUT_MS) {
+        return;
+    }
+
+    LOG_WARN("UWB stall detected (%lu ms without interrupt), reinitializing",
+             static_cast<unsigned long>(now - m_lastEventTimeMs));
+    uwbTdoa2AnchorRecordLastDwStatusBeforeStall(PackCurrentSysStatusLow32());
+    dwIdle(&m_Device);
+    uwbTdoa2AnchorRecordStallReset();
+    uwbTdoa2Algorithm.init(&m_UwbConfig, &m_Device);
+    uwbTdoa2Algorithm.onEvent(&m_Device, uwbEvent_t::eventTimeout);
+    m_lastEventTimeMs = now;
+}
+
+void UWBAnchorTDoA::ApplyRuntimeParams()
+{
+    const uint16_t desiredDelay = Front::uwbLittleFSFront.GetParams().ADelay;
+    if (desiredDelay == m_broadcastAntennaDelay) {
+        return;
+    }
+
+    m_broadcastAntennaDelay = desiredDelay;
+    m_UwbConfig.antennaDelay = desiredDelay;
+    uwbTdoa2AnchorSetAntennaDelay(desiredDelay);
+    LOG_INFO("Updated broadcast antenna delay: %u", static_cast<unsigned int>(desiredDelay));
+}
+
+void UWBAnchorTDoA::KickStartRadio()
+{
+    m_startRequested = true;
+    if (s_anchorRadioTaskHandle != nullptr) {
+        xTaskNotifyGive(s_anchorRadioTaskHandle);
+    }
+}
+
+void UWBAnchorTDoA::SuspendRadio()
+{
+    if (m_radioSuspended) {
+        return;
+    }
+
+    dwIdle(&m_Device);
+    m_DwData.interrupt_flags = 0;
+    m_lastEventTimeMs = 0;
+    m_startRequested = false;
+    m_radioSuspended = true;
+    LOG_INFO("UWB anchor radio suspended");
+}
+
+void UWBAnchorTDoA::ResumeRadio()
+{
+    ClearPendingInterruptAccounting();
+    m_DwData.interrupt_flags = 0;
+    uwbTdoa2Algorithm.init(&m_UwbConfig, &m_Device);
+    m_radioSuspended = false;
+
+    AttachInterruptHandler();
+
+    m_startRequested = true;
+    LOG_INFO("UWB anchor radio resumed");
+}
+
+void UWBAnchorTDoA::ClearPendingInterruptAccounting()
+{
+    portENTER_CRITICAL(&s_irqStatsMux);
+    s_pendingIrqCount = 0;
+    s_firstPendingIrqUs = 0;
+    portEXIT_CRITICAL(&s_irqStatsMux);
+}
+
+void UWBAnchorTDoA::AttachInterruptHandler()
+{
+    if (m_interruptPin < 0 || m_interruptAttached) {
+        return;
+    }
+
+    attachInterrupt(digitalPinToInterrupt(m_interruptPin),
+        anchorInterruptISR, RISING);
+    m_interruptAttached = true;
+}
+
+void UWBAnchorTDoA::DetachInterruptHandler()
+{
+    if (m_interruptPin < 0 || !m_interruptAttached) {
+        return;
+    }
+
+    detachInterrupt(digitalPinToInterrupt(m_interruptPin));
+    m_interruptAttached = false;
+}
+
+uint32_t UWBAnchorTDoA::PackCurrentSysStatusLow32() const
+{
+    return static_cast<uint32_t>(m_Device.sysstatus[0])
+        | (static_cast<uint32_t>(m_Device.sysstatus[1]) << 8)
+        | (static_cast<uint32_t>(m_Device.sysstatus[2]) << 16)
+        | (static_cast<uint32_t>(m_Device.sysstatus[3]) << 24);
 }
 
 template<libDw1000::IsrFlags TFlags>
@@ -164,7 +364,21 @@ void UWBAnchorTDoA::OnEvent()
 }
 
 static FAST_CODE void anchorInterruptISR() {
-    isr_flag = true;
+    const uint32_t nowUs = micros();
+    portENTER_CRITICAL_ISR(&s_irqStatsMux);
+    if (s_pendingIrqCount == 0) {
+        s_firstPendingIrqUs = nowUs;
+    }
+    if (s_pendingIrqCount < 0xffffffffu) {
+        s_pendingIrqCount++;
+    }
+    portEXIT_CRITICAL_ISR(&s_irqStatsMux);
+
+    if (s_anchorRadioTaskHandle != nullptr) {
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(s_anchorRadioTaskHandle, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
 }
 
 /* TODO: Move to FreeRTOS notifications */
