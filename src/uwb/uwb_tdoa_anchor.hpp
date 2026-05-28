@@ -33,12 +33,34 @@ public:
     void OnEvent();             // Called outside ISR context
 
     void Update() override;
+    void SetEnabled(bool enabled) override;
+    void RadioTask();
 
     static constexpr uint32_t STALL_TIMEOUT_MS = 150;
 
 private:
+    static constexpr BaseType_t UWB_TASK_CORE_ID = 1;
+    static constexpr uint32_t UWB_TASK_WAIT_MS = 10;
+
+    void ServicePendingInterrupts(uint32_t notifyCount);
+    void DispatchPendingEvents();
+    void CheckStallWatchdog();
+    void ApplyRuntimeParams();
+    void KickStartRadio();
+    void SuspendRadio();
+    void ResumeRadio();
+    void ClearPendingInterruptAccounting();
+    void AttachInterruptHandler();
+    void DetachInterruptHandler();
+    uint32_t PackCurrentSysStatusLow32() const;
+
     uint32_t m_lastEventTimeMs = 0;
     uint16_t m_broadcastAntennaDelay = 0;
+    volatile bool m_startRequested = false;
+    volatile bool m_radioEnabled = true;
+    bool m_radioSuspended = false;
+    bool m_interruptAttached = false;
+    int m_interruptPin = -1;
     // Libdw1000 device
     dwDevice_t m_Device;
     dwOps_t m_Ops = {

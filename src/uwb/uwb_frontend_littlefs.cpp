@@ -79,6 +79,23 @@ void UWBLittleFSFrontend::Init() {
     LOG_INFO("UWB frontend initialized");
 }
 
+void UWBLittleFSFrontend::SetRuntimeEnabled(bool enabled) {
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+    m_Params.uwbEnable = enabled ? 1 : 0;
+
+    if (m_Backend != nullptr) {
+        m_Backend->SetEnabled(enabled);
+        return;
+    }
+
+    if (enabled) {
+        InitBackendForCurrentMode();
+    }
+#else
+    (void)enabled;
+#endif
+}
+
 ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uint32_t len) {
     ErrorParam result = LittleFSFrontend<UWBParams>::SetParam(name, data, len);
     if (result != ErrorParam::OK) {
@@ -89,9 +106,10 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
     if (strcmp(name, "uwbEnable") == 0) {
         if (m_Params.uwbEnable == 0) {
             LOG_INFO("UWB runtime disabled");
+            SetRuntimeEnabled(false);
         } else {
             LOG_INFO("UWB runtime enabled");
-            InitBackendForCurrentMode();
+            SetRuntimeEnabled(true);
         }
         return result;
     }

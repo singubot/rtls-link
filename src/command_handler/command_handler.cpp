@@ -13,6 +13,7 @@
 #include "version.hpp"
 #include "logging/logging.hpp"
 #include "protocol/rtls_binary_protocol.hpp"
+#include "protocol/tdoa_anchor_stats_frame.hpp"
 
 #include "uwb/uwb_frontend_littlefs.hpp"
 #include "app/app_frontend_littlefs.hpp"
@@ -463,6 +464,7 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
     const bool knownBinaryCommand =
         commandStartsWith(command, "firmware-info")
         || commandStartsWith(command, "tdoa-distances")
+        || commandStartsWith(command, "tdoa-anchor-stats")
         || commandStartsWith(command, "backup-config")
         || commandStartsWith(command, "list-configs")
         || commandStartsWith(command, "read-config-named")
@@ -524,6 +526,26 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
             outFrame.AppendU16(distances[i]);
         }
         outFrame.Finish();
+        xSemaphoreGive(commandQueueMutex);
+        return true;
+    }
+
+    if (commandStartsWith(command, "tdoa-anchor-stats")) {
+        const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+        if (uwbParams.mode != UWBMode::ANCHOR_TDOA) {
+            appendAck(outFrame, rtls::protocol::StatusCode::InvalidMode, "Not in ANCHOR_TDOA mode");
+            xSemaphoreGive(commandQueueMutex);
+            return true;
+        }
+
+        uwbTdoa2AnchorStats_t stats = {};
+        if (!uwbTdoa2AnchorGetStats(&stats)) {
+            appendAck(outFrame, rtls::protocol::StatusCode::Error, "TDoA anchor algorithm not initialized");
+            xSemaphoreGive(commandQueueMutex);
+            return true;
+        }
+
+        rtls::protocol::AppendTdoaAnchorStatsFrame(outFrame, stats);
         xSemaphoreGive(commandQueueMutex);
         return true;
     }

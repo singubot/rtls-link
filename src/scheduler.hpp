@@ -57,6 +57,21 @@ public:
     }
   }
 
+  void NotifyGiveFromISR(TaskHandle_t handle)
+  {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (handle != nullptr) {
+      vTaskNotifyGiveFromISR(handle, &xHigherPriorityTaskWoken);
+      portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+  }
+
+  template<typename TDelegate, size_t StackSize, TaskType task_type>
+  void NotifyGiveFromISR(const StaticTaskHolder<TDelegate, StackSize, task_type>& task)
+  {
+    NotifyGiveFromISR(task.handle);
+  }
+
   /**
    * @brief Create a FreeRTOS static task. Thanks to etl::delegate we can easily create static tasks that point to a class member 
    * function with compile-time construction.
@@ -96,6 +111,37 @@ public:
       task.priority,
       task.stack,
       &task.taskData
+    );
+    task.handle = handle;
+  }
+
+  template<typename TDelegate, size_t StackSize, TaskType task_type>
+  void CreateStaticPinnedTask(StaticTaskHolder<TDelegate, StackSize, task_type>& task,
+                              BaseType_t coreId)
+  {
+    TaskHandle_t handle = xTaskCreateStaticPinnedToCore(
+      [] (void* pvParameters) {
+        StaticTaskHolder<TDelegate, StackSize, task_type>* task = static_cast<StaticTaskHolder<TDelegate, StackSize, task_type>*>(pvParameters);
+        if constexpr (task_type == TaskType::PERIODIC) {
+          TickType_t xLastWakeTime = xTaskGetTickCount();
+          const TickType_t xFrequency = pdMS_TO_TICKS(1000 / task->frequencyHz);
+          for (;;) {
+            vTaskDelayUntil(&xLastWakeTime, xFrequency);
+            task->taskFunction();
+          }
+        } else {
+          for (;;) {
+            task->taskFunction();
+          }
+        }
+      },
+      task.name,
+      StackSize,
+      &task,
+      task.priority,
+      task.stack,
+      &task.taskData,
+      coreId
     );
     task.handle = handle;
   }

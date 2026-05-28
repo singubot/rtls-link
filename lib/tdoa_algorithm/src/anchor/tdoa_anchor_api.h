@@ -18,6 +18,57 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define UWB_TDOA2_ANCHOR_STATS_VERSION 2
+#define UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT 8
+
+typedef struct uwbTdoa2AnchorSlotStats_s {
+  uint32_t goodRx;
+  uint32_t rxTimeout;
+  uint32_t rxFailed;
+  uint32_t unexpectedPacket;
+  uint32_t validDistance;
+  uint32_t invalidDistance;
+  uint32_t packetIdMismatch;
+} uwbTdoa2AnchorSlotStats_t;
+
+typedef struct uwbTdoa2AnchorStats_s {
+  uint8_t version;
+  uint8_t anchorId;
+  uint8_t activeSlots;
+  uint8_t state;
+  uint8_t slotState;
+  uint8_t slot;
+  uint8_t nextSlot;
+  uint8_t txEnabled;
+  uint16_t antennaDelay;
+  uint32_t slotDurationUs;
+  uint32_t frameDurationUs;
+  uint8_t slot0MissStreak;
+  uint32_t slot0Misses;
+  uint32_t syncAcquisitions;
+  uint32_t syncLosses;
+  uint32_t resyncs;
+  uint32_t stallResets;
+  uint32_t txScheduled;
+  uint32_t txDone;
+  uint32_t irqCount;
+  uint32_t irqToServiceLastUs;
+  uint32_t irqToServiceMaxUs;
+  uint32_t dwHandleInterruptLastUs;
+  uint32_t dwHandleInterruptMaxUs;
+  uint32_t uwbHardPathLastUs;
+  uint32_t uwbHardPathMaxUs;
+  uint32_t slotSlackMinUs;
+  uint32_t rxArmLateCount;
+  uint32_t txArmLateCount;
+  uint32_t missedDeadlineCount;
+  uint32_t guardedTxCount;
+  uint32_t lastDwStatusBeforeStall;
+  uint8_t packetIds[UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT];
+  uint16_t distances[UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT];
+  uwbTdoa2AnchorSlotStats_t slots[UWB_TDOA2_ANCHOR_STATS_SLOT_COUNT];
+} uwbTdoa2AnchorStats_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +81,39 @@ extern "C" {
  * @return true if copied, false if invalid args or not initialized.
  */
 bool uwbTdoa2AnchorGetDistances(uint16_t* out_distances, uint8_t max_len);
+
+/**
+ * @brief Copy the current TDoA anchor diagnostics snapshot.
+ *
+ * The snapshot is intentionally counter-oriented. Expensive DW1000 RX quality
+ * reads should be added as sampled/optional fields in a future schema version.
+ */
+bool uwbTdoa2AnchorGetStats(uwbTdoa2AnchorStats_t* out_stats);
+
+/**
+ * @brief Record a wrapper-level stall watchdog reset in anchor diagnostics.
+ */
+void uwbTdoa2AnchorRecordStallReset(void);
+
+/**
+ * @brief Record wrapper-level interrupt service timing.
+ */
+void uwbTdoa2AnchorRecordIrqService(uint32_t irq_count, uint32_t latency_us);
+
+/**
+ * @brief Record DW1000 interrupt handler duration.
+ */
+void uwbTdoa2AnchorRecordDwHandleInterrupt(uint32_t duration_us);
+
+/**
+ * @brief Record time spent dispatching the hard TDoA radio path.
+ */
+void uwbTdoa2AnchorRecordHardPath(uint32_t duration_us);
+
+/**
+ * @brief Record the latest DW1000 SYS_STATUS value before wrapper recovery.
+ */
+void uwbTdoa2AnchorRecordLastDwStatusBeforeStall(uint32_t status);
 
 /**
  * @brief Get the current anchor ID (0..7) used by the TDMA schedule.
@@ -53,4 +137,3 @@ void uwbTdoa2AnchorSetAntennaDelay(uint16_t delay);
 #ifdef __cplusplus
 } // extern "C"
 #endif
-

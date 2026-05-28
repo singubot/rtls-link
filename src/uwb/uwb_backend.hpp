@@ -14,6 +14,7 @@ public:
     virtual ~UWBBackend() = default;
 
     virtual void Update() = 0;
+    virtual void SetEnabled(bool enabled) { (void)enabled; }
 
     virtual uint32_t GetNumberOfConnectedDevices() { return 0; }
 };

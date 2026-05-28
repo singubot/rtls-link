@@ -59,10 +59,6 @@
 
 #include "mac.h"
 
-extern "C" {
-  #include "lpp.h"
-}
-
 #include "tdoa_anchor.hpp"
 
 #define debug(...) printf(__VA_ARGS__)
@@ -82,6 +78,9 @@ static constexpr uint64_t kDelayedTxRxAlignMask = (1ull << 9) - 1;
 // Represented as a rational to avoid floating point: 63897.6 = 638976 / 10
 static constexpr uint64_t kDwTicksPerUsNum = 638976;
 static constexpr uint64_t kDwTicksPerUsDen = 10;
+static constexpr uint64_t kDwTimestampMask = (1ULL << 40) - 1;
+static constexpr uint64_t kDwTimestampHalfWrap = 1ULL << 39;
+static constexpr uint32_t kSlotSlackNoSampleUs = 0xffffffffu;
 
 static uint64_t usToDwTicks(uint32_t us)
 {
@@ -108,9 +107,6 @@ static uint64_t alignDwTicks512(uint64_t ticks)
 // Use a longer window to avoid duty-cycled listen gaps during acquisition.
 #define RECEIVE_SYNC_TIMEOUT 20000
 
-// Timeout for receiving a service packet after we TX ours
-#define RECEIVE_SERVICE_TIMEOUT 800
-
 #define TS_TX_SIZE 4
 
 // Useful constants
@@ -129,6 +125,48 @@ enum slotState_e {
   slotRxDone,
   slotTxDone,
 };
+
+static uint32_t dwTicksToUs(uint64_t ticks)
+{
+  return static_cast<uint32_t>((ticks * kDwTicksPerUsDen + (kDwTicksPerUsNum / 2)) / kDwTicksPerUsNum);
+}
+
+static uint64_t wrapDwTime(uint64_t time)
+{
+  return time & kDwTimestampMask;
+}
+
+static int64_t signedDwTimeDiff(uint64_t target, uint64_t reference)
+{
+  const uint64_t forwardDiff = (target - reference) & kDwTimestampMask;
+  if (forwardDiff >= kDwTimestampHalfWrap) {
+    return -static_cast<int64_t>((reference - target) & kDwTimestampMask);
+  }
+  return static_cast<int64_t>(forwardDiff);
+}
+
+static void inc32(uint32_t& value)
+{
+  if (value < 0xffffffffu) {
+    value++;
+  }
+}
+
+static void add32(uint32_t& value, uint32_t amount)
+{
+  if (0xffffffffu - value < amount) {
+    value = 0xffffffffu;
+  } else {
+    value += amount;
+  }
+}
+
+static void max32(uint32_t& value, uint32_t sample)
+{
+  if (sample > value) {
+    value = sample;
+  }
+}
 
 // This context struct contains all the requied global values of the algorithm
 static struct ctx_s {
@@ -160,6 +198,7 @@ static struct ctx_s {
 
   uint16_t distances[NSLOTS];
   uint16_t antennaDelay;
+  uwbTdoa2AnchorStats_t stats;
 } ctx;
 
 static bool s_initialized = false;
@@ -172,6 +211,48 @@ static uint64_t tdmaLastFrame(uint64_t now)
   return now - (now % ctx.frameLen);
 }
 
+static uint8_t statsSlotIndex(int slot)
+{
+  if (slot < 0 || slot >= NSLOTS) {
+    return 0;
+  }
+  return static_cast<uint8_t>(slot);
+}
+
+static void resetVolatileStatsFields()
+{
+  ctx.stats.version = UWB_TDOA2_ANCHOR_STATS_VERSION;
+  ctx.stats.anchorId = static_cast<uint8_t>(ctx.anchorId);
+  ctx.stats.activeSlots = ctx.activeSlots;
+  ctx.stats.state = static_cast<uint8_t>(ctx.state);
+  ctx.stats.slotState = static_cast<uint8_t>(ctx.slotState);
+  ctx.stats.slot = static_cast<uint8_t>(ctx.slot);
+  ctx.stats.nextSlot = static_cast<uint8_t>(ctx.nextSlot);
+  ctx.stats.txEnabled = ctx.txEnabled ? 1 : 0;
+  ctx.stats.antennaDelay = ctx.antennaDelay;
+  ctx.stats.slotDurationUs = dwTicksToUs(ctx.slotLen);
+  ctx.stats.frameDurationUs = dwTicksToUs(ctx.frameLen);
+  ctx.stats.slot0MissStreak = ctx.slot0MissCount;
+}
+
+static void refreshStatsSnapshot()
+{
+  resetVolatileStatsFields();
+  memcpy(ctx.stats.packetIds, ctx.packetIds, sizeof(ctx.stats.packetIds));
+  memcpy(ctx.stats.distances, ctx.distances, sizeof(ctx.stats.distances));
+}
+
+static void recordSyncAcquisition()
+{
+  inc32(ctx.stats.syncAcquisitions);
+}
+
+static void recordSyncLoss()
+{
+  inc32(ctx.stats.syncLosses);
+  inc32(ctx.stats.resyncs);
+}
+
 // Packet formats
 #define PACKET_TYPE_TDOA2 0x22
 
@@ -182,10 +263,6 @@ typedef struct rangePacket_s {
   uint16_t distances[NSLOTS];
   uint16_t antennaDelay;  // This anchor's configured antenna delay (DW1000 ticks)
 } __attribute__((packed)) rangePacket_t;
-
-#define LPP_HEADER (sizeof(rangePacket_t))
-#define LPP_TYPE (sizeof(rangePacket_t)+1)
-#define LPP_PAYLOAD (sizeof(rangePacket_t)+2)
 
 /* Adjust time for schedule transfer by DW1000 radio. Set 9 LSB to 0 */
 static uint32_t adjustTxRxTime(dwTime_t *time)
@@ -214,6 +291,43 @@ static dwTime_t transmitTimeForSlot(int slot)
   return transmitTime;
 }
 
+static uint64_t transmitPhaseForAlignedFrameStart(int slot)
+{
+  dwTime_t phase = { .full = 0 };
+
+  // Slot length and frame length are aligned to 512 DW ticks. Compute the
+  // known TX phase directly instead of taking modulo on a truncated timestamp.
+  phase.full = static_cast<uint64_t>(slot) * ctx.slotLen;
+  phase.full += TDMA_GUARD_LENGTH;
+  phase.full += PREAMBLE_LENGTH;
+  adjustTxRxTime(&phase);
+
+  return phase.full;
+}
+
+static void recordArmMargin(dwDevice_t* dev, const dwTime_t& targetTime, bool tx)
+{
+  dwTime_t now = { .full = 0 };
+  dwGetSystemTimestamp(dev, &now);
+
+  const int64_t marginTicks = signedDwTimeDiff(targetTime.full, now.full);
+  if (marginTicks <= 0) {
+    inc32(ctx.stats.missedDeadlineCount);
+    if (tx) {
+      inc32(ctx.stats.txArmLateCount);
+    } else {
+      inc32(ctx.stats.rxArmLateCount);
+    }
+    ctx.stats.slotSlackMinUs = 0;
+    return;
+  }
+
+  const uint32_t marginUs = dwTicksToUs(static_cast<uint64_t>(marginTicks));
+  if (marginUs < ctx.stats.slotSlackMinUs) {
+    ctx.stats.slotSlackMinUs = marginUs;
+  }
+}
+
 static void handleFailedRx(dwDevice_t *dev)
 {
   (void)dev;
@@ -225,17 +339,19 @@ static void handleFailedRx(dwDevice_t *dev)
   // environments. Only drop sync after a few consecutive misses to reduce
   // sync oscillation.
   if (ctx.slot == 0) {
+    inc32(ctx.stats.slot0Misses);
     if (ctx.slot0MissCount < 0xff) {
       ctx.slot0MissCount++;
     }
     if (ctx.slot0MissCount >= kSlot0MissThreshold) {
       ctx.state = syncTdmaState;
       ctx.slot0MissCount = 0;
+      recordSyncLoss();
     }
   }
 }
 
-static void calculateDistance(int slot, int newId, int remotePid, uint32_t remoteTx, uint32_t remoteRx, uint32_t ts)
+static bool calculateDistance(int slot, int newId, int remotePid, uint32_t remoteTx, uint32_t remoteRx, uint32_t ts)
 {
   // Check that the 2 last packets are consecutive packets and that our last packet is in beteen
   if ((ctx.packetIds[slot] == ((newId-1) & 0x0ff)) && remotePid == ctx.packetIds[ctx.anchorId]) {
@@ -246,8 +362,10 @@ static void calculateDistance(int slot, int newId, int remotePid, uint32_t remot
 
     uint32_t distance = ((tround2 * tround1)-(treply1 * treply2)) / (2*(treply1 + tround2));
     ctx.distances[slot] = distance & 0xfffful;
+    return true;
   } else {
     ctx.distances[slot] = 0;
+    return false;
   }
 }
 
@@ -264,18 +382,27 @@ static void handleRxPacket(dwDevice_t *dev)
   dwGetData(dev, (uint8_t*)&rxPacket, dataLength);
 
   if (dataLength == 0 || rxPacket.payload[0] != PACKET_TYPE_TDOA2 || rxPacket.sourceAddress[0] != ctx.slot) {
+    inc32(ctx.stats.slots[statsSlotIndex(ctx.slot)].unexpectedPacket);
     handleFailedRx(dev);
     return;
   }
   rangePacket_t * rangePacket = (rangePacket_t *)rxPacket.payload;
+  uwbTdoa2AnchorSlotStats_t& slotStats = ctx.stats.slots[statsSlotIndex(ctx.slot)];
+  inc32(slotStats.goodRx);
 
   uint32_t remoteTx;
   memcpy(&remoteTx, rangePacket->timestamps[ctx.slot], 4);
   uint32_t remoteRx;
   memcpy(&remoteRx, rangePacket->timestamps[ctx.anchorId], 4);
 
-  calculateDistance(ctx.slot, rangePacket->pid[ctx.slot], rangePacket->pid[ctx.anchorId],
-                    remoteTx, remoteRx, rxTime.low32);
+  const bool distanceValid = calculateDistance(ctx.slot, rangePacket->pid[ctx.slot], rangePacket->pid[ctx.anchorId],
+                                               remoteTx, remoteRx, rxTime.low32);
+  if (distanceValid) {
+    inc32(slotStats.validDistance);
+  } else {
+    inc32(slotStats.invalidDistance);
+    inc32(slotStats.packetIdMismatch);
+  }
 
   ctx.packetIds[ctx.slot] = rangePacket->pid[ctx.slot];
   ctx.rxTimestamps[ctx.slot] = rxTime.low32;
@@ -284,25 +411,13 @@ static void handleRxPacket(dwDevice_t *dev)
   // Resync TDMA and save useful anchor 0 information
   if (ctx.slot == 0) {
     ctx.slot0MissCount = 0;
-    // Resync local frame start to packet from anchor 0
-    dwTime_t pkTxTime = { .full = 0 };
-    memcpy(&pkTxTime, rangePacket->timestamps[ctx.slot], TS_TX_SIZE);
-    ctx.tdmaFrameStart.full = rxTime.full - (pkTxTime.full - tdmaLastFrame(pkTxTime.full));
+
+    // Resync local frame start to packet from anchor 0. The previous
+    // implementation used low32 % frameLen, which is only valid when frameLen
+    // divides the DW1000 32-bit timestamp wrap period.
+    ctx.tdmaFrameStart.full = wrapDwTime(rxTime.full - transmitPhaseForAlignedFrameStart(0));
 
     //TODO: Save relevant data to calculate masterTime
-  }
-}
-
-static void handleServicePacket(dwDevice_t *dev)
-{
-  static packet_t servicePacket;
-
-  int dataLength = dwGetDataLength(dev);
-  servicePacket.payload[0] = 0;
-  dwGetData(dev, (uint8_t*)&servicePacket, dataLength);
-
-  if (servicePacket.payload[0] == SHORT_LPP) {
-    lppHandleShortPacket(reinterpret_cast<char*>(&servicePacket.payload[1]), dataLength - MAC802154_HEADER_LENGTH - 1);
   }
 }
 
@@ -314,6 +429,7 @@ static void setupRx(dwDevice_t *dev)
   // Calculate start of the slot
   receiveTime.full = ctx.tdmaFrameStart.full + static_cast<uint64_t>(ctx.nextSlot) * ctx.slotLen;
   adjustTxRxTime(&receiveTime);
+  recordArmMargin(dev, receiveTime, false);
 
   dwSetReceiveWaitTimeout(dev, RECEIVE_TIMEOUT);
   dwWriteSystemConfigurationRegister(dev);
@@ -329,7 +445,6 @@ static void setTxData(dwDevice_t *dev)
 {
   static packet_t txPacket;
   static bool firstEntry = true;
-  static int lppLength = 0;
 
   if (firstEntry) {
     MAC80215_PACKET_INIT(txPacket, MAC802154_TYPE_DATA);
@@ -344,20 +459,6 @@ static void setTxData(dwDevice_t *dev)
     firstEntry = false;
   }
 
-  // TODO: Disabled for now. Needs to be enabled. TODO: Removed in the future.
-  // uwbConfig_t *uwbConfig = uwbGetConfig();
-
-  // LPP anchor position is currently sent in all packets
-  // if (uwbConfig->positionEnabled) {
-  //   txPacket.payload[LPP_HEADER] = SHORT_LPP;
-  //   txPacket.payload[LPP_TYPE] = LPP_SHORT_ANCHOR_POSITION;
-
-  //   struct lppShortAnchorPosition_s *pos = (struct lppShortAnchorPosition_s*) &txPacket.payload[LPP_PAYLOAD];
-  //   memcpy(pos->position, uwbConfig->position, 3*sizeof(float));
- 
-  //   lppLength = 2 + sizeof(struct lppShortAnchorPosition_s);
-  // }
-
   rangePacket_t *rangePacket = (rangePacket_t *)txPacket.payload;
 
   for (int i=0; i<NSLOTS; i++) {
@@ -368,7 +469,7 @@ static void setTxData(dwDevice_t *dev)
   memcpy(rangePacket->distances, ctx.distances, sizeof(ctx.distances));
   rangePacket->antennaDelay = ctx.antennaDelay;
 
-  dwSetData(dev, (uint8_t*)&txPacket, MAC802154_HEADER_LENGTH + sizeof(rangePacket_t) + lppLength);
+  dwSetData(dev, (uint8_t*)&txPacket, MAC802154_HEADER_LENGTH + sizeof(rangePacket_t));
 }
 
 // Setup the radio to send a packet in the next timeslot
@@ -377,16 +478,15 @@ static void setupTx(dwDevice_t *dev)
   ctx.packetIds[ctx.anchorId] = ctx.pid++;
   dwTime_t txTime = transmitTimeForSlot(ctx.nextSlot);
   ctx.txTimestamps[ctx.anchorId] = txTime.low32;
-
-  dwSetReceiveWaitTimeout(dev, RECEIVE_SERVICE_TIMEOUT);
-  dwWriteSystemConfigurationRegister(dev);
+  inc32(ctx.stats.txScheduled);
+  recordArmMargin(dev, txTime, true);
 
   dwNewTransmit(dev);
   dwSetDefaults(dev);
   setTxData(dev);
   dwSetTxRxTime(dev, txTime);
 
-  dwWaitForResponse(dev, true);
+  dwWaitForResponse(dev, false);
   dwStartTransmit(dev);
 }
 
@@ -415,6 +515,12 @@ static uint32_t slotStep(dwDevice_t *dev, uwbEvent_t event)
       if (event == eventPacketReceived) {
         handleRxPacket(dev);
       } else {
+        uwbTdoa2AnchorSlotStats_t& slotStats = ctx.stats.slots[statsSlotIndex(ctx.slot)];
+        if (event == eventReceiveFailed) {
+          inc32(slotStats.rxFailed);
+        } else {
+          inc32(slotStats.rxTimeout);
+        }
         handleFailedRx(dev);
       }
 
@@ -431,19 +537,9 @@ static uint32_t slotStep(dwDevice_t *dev, uwbEvent_t event)
 
       break;
     case slotTxDone:
-    // We try to receive an LPP packet after sending our packet.
-    // After this is done, we setup the next receive.
       if (event == eventPacketSent) {
-        // TX complete; radio auto-switches to RX (dwWaitForResponse).
-        // Wait for the subsequent RX event.
-        break;
+        inc32(ctx.stats.txDone);
       }
-      if (event == eventPacketReceived) {
-        debug("Received service packet!\r\n");
-        handleServicePacket(dev);
-      }
-      // eventReceiveTimeout, eventReceiveFailed, or eventTimeout:
-      // proceed to next slot
       setupRx(dev);
       ctx.slotState = slotRxDone;
       updateSlot();
@@ -512,6 +608,12 @@ static void tdoa2Init(uwbConfig_t * config, dwDevice_t *dev)
   memset(ctx.rxTimestamps, 0, sizeof(ctx.rxTimestamps));
   memset(ctx.distances, 0, sizeof(ctx.distances));
 
+  if (!s_initialized) {
+    memset(&ctx.stats, 0, sizeof(ctx.stats));
+    ctx.stats.slotSlackMinUs = kSlotSlackNoSampleUs;
+  }
+  refreshStatsSnapshot();
+
   s_initialized = true;
 }
 
@@ -531,6 +633,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
       dwGetSystemTimestamp(dev, &sysTime);
       ctx.tdmaFrameStart.full = tdmaLastFrame(sysTime.full) + 2 * ctx.frameLen;
       ctx.state = synchronizedState;
+      recordSyncAcquisition();
       setupTx(dev);
 
       ctx.slotState = slotTxDone;
@@ -549,6 +652,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
               ctx.nextSlot = 1;
               ctx.slotState = slotRxDone;
               ctx.state = synchronizedState;
+              recordSyncAcquisition();
               return slotStep(dev, eventPacketReceived);
             } else {
               // Start the receiver waiting for a packet from anchor 0
@@ -603,6 +707,67 @@ extern "C" bool uwbTdoa2AnchorGetDistances(uint16_t* out_distances, uint8_t max_
     out_distances[i] = ctx.distances[i];
   }
   return true;
+}
+
+extern "C" bool uwbTdoa2AnchorGetStats(uwbTdoa2AnchorStats_t* out_stats)
+{
+  if (!s_initialized || out_stats == nullptr) {
+    return false;
+  }
+
+  refreshStatsSnapshot();
+  memcpy(out_stats, &ctx.stats, sizeof(ctx.stats));
+  return true;
+}
+
+extern "C" void uwbTdoa2AnchorRecordStallReset(void)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  inc32(ctx.stats.stallResets);
+  inc32(ctx.stats.resyncs);
+}
+
+extern "C" void uwbTdoa2AnchorRecordIrqService(uint32_t irq_count, uint32_t latency_us)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  add32(ctx.stats.irqCount, irq_count);
+  ctx.stats.irqToServiceLastUs = latency_us;
+  max32(ctx.stats.irqToServiceMaxUs, latency_us);
+}
+
+extern "C" void uwbTdoa2AnchorRecordDwHandleInterrupt(uint32_t duration_us)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  ctx.stats.dwHandleInterruptLastUs = duration_us;
+  max32(ctx.stats.dwHandleInterruptMaxUs, duration_us);
+}
+
+extern "C" void uwbTdoa2AnchorRecordHardPath(uint32_t duration_us)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  ctx.stats.uwbHardPathLastUs = duration_us;
+  max32(ctx.stats.uwbHardPathMaxUs, duration_us);
+}
+
+extern "C" void uwbTdoa2AnchorRecordLastDwStatusBeforeStall(uint32_t status)
+{
+  if (!s_initialized) {
+    return;
+  }
+
+  ctx.stats.lastDwStatusBeforeStall = status;
 }
 
 extern "C" uint8_t uwbTdoa2AnchorGetAnchorId(void)
