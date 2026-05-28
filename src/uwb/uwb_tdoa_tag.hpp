@@ -21,7 +21,7 @@ extern "C" {
 
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
 #include "tag/dynamicAnchorPositions.hpp"
-// Forward declaration for telemetry struct (defined in wifi_discovery.hpp)
+// Forward declaration for telemetry struct (defined in wifi_device_telemetry.hpp)
 struct DynamicAnchorTelemetry;
 #endif
 

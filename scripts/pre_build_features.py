@@ -140,10 +140,8 @@ def validate_features(flags, board_define=None):
 
     # === WIFI DEPENDENCIES ===
     wifi_features = [
-        'USE_WIFI_WEBSERVER',
-        'USE_WIFI_TCP_LOGGING',
         'USE_WIFI_UART_BRIDGE',
-        'USE_WIFI_DISCOVERY',
+        'USE_WIFI_MAVLINK_MANAGEMENT',
         'USE_WIFI_MDNS'
     ]
     for feat in wifi_features:
@@ -179,8 +177,8 @@ def validate_features(flags, board_define=None):
     # === OTA DEPENDENCIES ===
     if 'USE_OTA_WEB' in flag_set and 'USE_OTA' not in flag_set:
         errors.append("USE_OTA_WEB requires USE_OTA")
-    if 'USE_OTA_WEB' in flag_set and 'USE_WIFI_WEBSERVER' not in flag_set:
-        errors.append("USE_OTA_WEB requires USE_WIFI_WEBSERVER")
+    if 'USE_OTA_WEB' in flag_set and 'USE_WIFI' not in flag_set:
+        errors.append("USE_OTA_WEB requires USE_WIFI")
 
     # === TAG MODE REQUIRES OUTPUT ===
     tag_modes = ['USE_UWB_MODE_TDOA_TAG']

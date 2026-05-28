@@ -1108,7 +1108,7 @@ static void estimatorProcess() {
 
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
 // Include for DynamicAnchorTelemetry definition
-#include "wifi/wifi_discovery.hpp"
+#include "wifi/wifi_device_telemetry.hpp"
 
 bool UWBTagTDoA::IsDynamicPositioningEnabled() {
     return s_useDynamicPositions;
@@ -1119,7 +1119,7 @@ uint8_t UWBTagTDoA::GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8
         return 0;
     }
 
-    // Try to acquire mutex with short timeout (10ms) to avoid blocking discovery
+    // Try to acquire mutex with short timeout (10ms) to avoid blocking telemetry updates.
     if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(10)) != pdTRUE) {
         return 0;  // Mutex unavailable, skip this update
     }

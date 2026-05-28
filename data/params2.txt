@@ -4,11 +4,9 @@ wifi.pswdAP: 12345678
 wifi.ssidST: DIGIFIBRA-b6ZD
 wifi.pswdST: TdCDDApRfA
 wifi.gcsIp: 192.168.1.211
-wifi.dbgPort: 8080
 wifi.udpPort: 14550
 wifi.enableWebServer: 1
 wifi.enableUartBridge: 1
-wifi.enableDebugSocket: 0
 uwb.mode: 4
 uwb.uwbEnable: 1
 uwb.devShortAddr: 1

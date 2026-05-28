@@ -51,7 +51,7 @@ The CI automatically runs on:
 
 ## Anchor Antenna-Delay Calibration (TDoA)
 
-TDoA anchors can report inter-anchor ToF (raw DW1000 ticks) via the console/websocket command `tdoa-distances`. The `rtls-link-cli` tool can use these measurements plus externally measured anchor distances (e.g., a rectangle layout) to solve per-anchor antenna delays and write them back to `uwb.ADelay` at runtime.
+TDoA anchors can report inter-anchor ToF (raw DW1000 ticks) via the console or MAVLink command `tdoa-distances`. The `rtls-link-cli` tool can use these measurements plus externally measured anchor distances (e.g., a rectangle layout) to solve per-anchor antenna delays and write them back to `uwb.ADelay` at runtime.
 
 The CLI lives inside the `tools/rtls-link-manager` submodule so the desktop app and automation use the same Rust backend implementation:
 

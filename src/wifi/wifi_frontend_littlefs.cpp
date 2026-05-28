@@ -2,21 +2,16 @@
 
 #include "wifi_frontend_littlefs.hpp"
 
-// Conditional includes based on feature flags
-#ifdef USE_WIFI_WEBSERVER
-#include "wifi_websocket.hpp"
+#ifdef USE_OTA_WEB
+#include "wifi_ota_server.hpp"
 #endif
 
 #ifdef USE_WIFI_UART_BRIDGE
 #include "wifi_uart_bridge.hpp"
 #endif
 
-#ifdef USE_WIFI_TCP_LOGGING
-#include "wifi_tcp_server.hpp"
-#endif
-
-#ifdef USE_WIFI_DISCOVERY
-#include "wifi_discovery.hpp"
+#ifdef USE_WIFI_MAVLINK_MANAGEMENT
+#include "wifi_mavlink_management.hpp"
 #endif
 
 #include "logging/logging.hpp"
@@ -58,7 +53,7 @@ private:
 } // namespace
 
 // Free function for telemetry callback (ETL delegates require free function or static method)
-#ifdef USE_WIFI_DISCOVERY
+#ifdef USE_WIFI_MAVLINK_MANAGEMENT
 static DeviceTelemetry GetDeviceTelemetry() {
     DeviceTelemetry t;
     const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
@@ -128,7 +123,7 @@ static DeviceTelemetry GetDeviceTelemetry() {
 
     return t;
 }
-#endif // USE_WIFI_DISCOVERY
+#endif // USE_WIFI_MAVLINK_MANAGEMENT
 
 // I will define a static FreeRTOS task holder for station connection checks
 static StaticTaskHolder<etl::delegate<void()>, 4096> wifi_connection_task = {
@@ -154,12 +149,6 @@ void WifiLittleFSFrontend::Init() {
 
     UpdateMode(m_Params.mode);
 
-#ifdef USE_WIFI_TCP_LOGGING
-    m_TcpLoggingServer = new WifiTcpServer(m_Params.dbgPort);
-#else
-    m_TcpLoggingServer = nullptr;
-#endif
-
     // Apply logging settings from stored params
     ApplyLoggingSettings();
 
@@ -183,9 +172,6 @@ void WifiLittleFSFrontend::Update() {
         }
     }
     
-    if (m_TcpLoggingServer) {
-        m_TcpLoggingServer->Update();
-    }
 }
 
 bool WifiLittleFSFrontend::SetupAP() {
@@ -196,7 +182,7 @@ bool WifiLittleFSFrontend::SetupAP() {
 
     if (success) {
         LOG_INFO("AP IP: %s", WiFi.softAPIP().toString().c_str());
-        SetupWebServer();
+        SetupNetworkServices();
         return true;
     } else {
         LOG_WARN("AP setup failed");
@@ -213,22 +199,34 @@ void WifiLittleFSFrontend::SetupStation() {
     WiFi.begin(m_Params.ssidST.data(), m_Params.pswdST.data());
 }
 
-void WifiLittleFSFrontend::SetupWebServer() {
+void WifiLittleFSFrontend::SetupNetworkServices() {
     BackendsLockGuard lock(m_backendsMutex);
     if (!lock.IsLocked()) {
-        LOG_WARN("WiFi backend lock failed in SetupWebServer()");
+        LOG_WARN("WiFi backend lock failed in SetupNetworkServices()");
         return;
     }
 
     ClearBackendsUnlocked();
 
     if (m_Params.enableWebServer) {
-#ifdef USE_WIFI_WEBSERVER
-        LOG_INFO("WebSocket server enabled");
-        WifiWebSocket* webSocketServer = new WifiWebSocket("/ws", 80);
-        m_Backends.push_back(webSocketServer);
+#ifdef USE_OTA_WEB
+        LOG_INFO("HTTP OTA server enabled");
+        WifiOtaServer* otaServer = new WifiOtaServer(80);
+        m_Backends.push_back(otaServer);
 #else
-        LOG_WARN("WebServer requested but USE_WIFI_WEBSERVER not compiled");
+        LOG_WARN("HTTP OTA server requested but USE_OTA_WEB not compiled");
+#endif
+    }
+
+    if (m_Params.enableMavlinkManagement) {
+#ifdef USE_WIFI_MAVLINK_MANAGEMENT
+        WifiMavlinkManagement* management = new WifiMavlinkManagement(m_Params.mavlinkManagementPort, m_Params);
+        management->SetTelemetryCallback(TelemetryCallback::create<&GetDeviceTelemetry>());
+        m_Backends.push_back(management);
+        LOG_INFO("MAVLink management enabled on UDP port %u",
+                 static_cast<unsigned int>(m_Params.mavlinkManagementPort));
+#else
+        LOG_WARN("MAVLink management requested but USE_WIFI_MAVLINK_MANAGEMENT not compiled");
 #endif
     }
 
@@ -248,19 +246,6 @@ void WifiLittleFSFrontend::SetupWebServer() {
 #endif
     }
 
-    if (m_Params.enableDiscovery) {
-#ifdef USE_WIFI_DISCOVERY
-        WifiDiscovery* discoveryBackend = new WifiDiscovery(m_Params.discoveryPort, m_Params);
-        // Set telemetry callback for heartbeat enrichment
-        discoveryBackend->SetTelemetryCallback(
-            TelemetryCallback::create<&GetDeviceTelemetry>()
-        );
-        m_Backends.push_back(discoveryBackend);
-        LOG_INFO("Discovery service enabled on port %d", m_Params.discoveryPort);
-#else
-        LOG_WARN("Discovery requested but USE_WIFI_DISCOVERY not compiled");
-#endif
-    }
 }
 
 void WifiLittleFSFrontend::UpdateMode(WifiMode mode) {
@@ -287,7 +272,7 @@ void WifiLittleFSFrontend::StationConnectionThread() {
     if (m_currentMode == WifiMode::STATION) {
         if (WiFi.status() == WL_CONNECTED && !m_stationConnected) {
             LOG_INFO("WiFi connected - IP: %s", WiFi.localIP().toString().c_str());
-            SetupWebServer();
+            SetupNetworkServices();
             m_stationConnected = true;
 
             // Re-apply logging settings now that WiFi is connected
@@ -346,20 +331,20 @@ ErrorParam WifiLittleFSFrontend::SetParam(const char* name, const void* data, ui
         UpdateMode(m_Params.mode);
     }
 
-    // Reconfigure runtime WiFi services immediately when bridge/server/discovery
+    // Reconfigure runtime WiFi services immediately when bridge/server/management
     // parameters are updated and networking is currently active.
-    // gcsIp is intentionally excluded: WifiDiscovery reads it live every heartbeat,
-    // and tearing down AsyncWebServer + rebinding port 80 occasionally fails to
-    // re-bind, leaving HTTP/WS dead until reboot. UART bridge keeps its old gcsIp
+    // gcsIp is intentionally excluded: MAVLink management reads it live every
+    // heartbeat, and tearing down AsyncWebServer + rebinding port 80 occasionally
+    // fails to re-bind, leaving HTTP OTA dead until reboot. UART bridge keeps its old gcsIp
     // until explicit toggle or reboot, which is the safer trade-off.
     if (strcmp(name, "enableWebServer") == 0 ||
         strcmp(name, "enableUartBridge") == 0 ||
-        strcmp(name, "enableDiscovery") == 0 ||
+        strcmp(name, "enableMavlinkManagement") == 0 ||
         strcmp(name, "udpPort") == 0 ||
-        strcmp(name, "discoveryPort") == 0) {
+        strcmp(name, "mavlinkManagementPort") == 0) {
         if (m_currentMode == WifiMode::AP ||
             (m_currentMode == WifiMode::STATION && m_stationConnected)) {
-            SetupWebServer();
+            SetupNetworkServices();
         }
     }
 

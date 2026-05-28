@@ -30,8 +30,8 @@ static portMUX_TYPE s_irqStatsMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t s_pendingIrqCount = 0;
 static volatile uint32_t s_firstPendingIrqUs = 0;
 
-// AsyncTCP runs at priority 3 by default. Keep the radio task below it so
-// OTA/WebSocket traffic can complete even when UWB IRQs are dense.
+// Keep the radio task below network/OTA work so firmware updates can complete
+// even when UWB IRQs are dense.
 static constexpr uint32_t kAnchorRadioTaskPriority = 2;
 
 static StaticTaskHolder<etl::delegate<void()>, 4096, TaskType::CONTINUOUS> anchor_radio_task = {
