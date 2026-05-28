@@ -223,8 +223,23 @@ ErrorParam UWBLittleFSFrontend::LoadParams() {
             return ErrorParam::INVALID_DATA;
         }
 #endif
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+        if (m_Params.uwbEnable == 0) {
+            SetRuntimeEnabled(false);
+            return result;
+        }
+        if (!SetRuntimeEnabled(true)) {
+            LOG_ERROR("Rejected stored UWB params; backend could not be enabled");
+            m_Params = previousParams;
+            SetRuntimeEnabled(previousParams.uwbEnable != 0);
+            return ErrorParam::INVALID_DATA;
+        }
+#endif
         if (m_Backend != nullptr && !ApplyLoadedRuntimeConfig()) {
             RestoreTagRuntimeState(previousParams, true, true, true);
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+            SetRuntimeEnabled(previousParams.uwbEnable != 0);
+#endif
             return ErrorParam::INVALID_DATA;
         }
     }
@@ -392,20 +407,24 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
     return estimatorApplied;
 }
 
-void UWBLittleFSFrontend::SetRuntimeEnabled(bool enabled) {
+bool UWBLittleFSFrontend::SetRuntimeEnabled(bool enabled) {
 #ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
     m_Params.uwbEnable = enabled ? 1 : 0;
 
     if (m_Backend != nullptr) {
         m_Backend->SetEnabled(enabled);
-        return;
+        return true;
     }
 
     if (enabled) {
         InitBackendForCurrentMode();
+        return m_Backend != nullptr;
     }
+
+    return true;
 #else
     (void)enabled;
+    return true;
 #endif
 }
 
@@ -439,6 +458,9 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
                                restoreEstimator,
                                restoreRtlslinkBeacon,
                                clearPendingDynamicBeacon);
+#ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
+        SetRuntimeEnabled(rollbackParams.uwbEnable != 0);
+#endif
         const ErrorParam rollbackResult = SaveParams();
         if (rollbackResult != ErrorParam::OK) {
             return rollbackResult;
@@ -453,8 +475,10 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
             SetRuntimeEnabled(false);
         } else {
             LOG_INFO("UWB runtime enabled");
-            SetRuntimeEnabled(true);
-            ApplyLoadedRuntimeConfig();
+            if (!SetRuntimeEnabled(true) || !ApplyLoadedRuntimeConfig()) {
+                LOG_ERROR("Rejected UWB runtime enable; restoring previous UWB params");
+                return rollbackParamsAndRuntime(previousParams, true, true, true);
+            }
         }
         return result;
     }

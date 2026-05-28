@@ -23,7 +23,7 @@ public:
         return etl::string_view("uwb");
     }
 
-    void SetRuntimeEnabled(bool enabled);
+    bool SetRuntimeEnabled(bool enabled);
 
     UWBParams& GetParams() {
         return m_Params;
