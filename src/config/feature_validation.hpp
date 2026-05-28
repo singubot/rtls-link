@@ -15,20 +15,12 @@
 // WIFI SUBSYSTEM DEPENDENCIES
 // =============================================================================
 
-#if defined(USE_WIFI_WEBSERVER) && !defined(USE_WIFI)
-    #error "USE_WIFI_WEBSERVER requires USE_WIFI to be defined"
-#endif
-
-#if defined(USE_WIFI_TCP_LOGGING) && !defined(USE_WIFI)
-    #error "USE_WIFI_TCP_LOGGING requires USE_WIFI to be defined"
-#endif
-
 #if defined(USE_WIFI_UART_BRIDGE) && !defined(USE_WIFI)
     #error "USE_WIFI_UART_BRIDGE requires USE_WIFI to be defined"
 #endif
 
-#if defined(USE_WIFI_DISCOVERY) && !defined(USE_WIFI)
-    #error "USE_WIFI_DISCOVERY requires USE_WIFI to be defined"
+#if defined(USE_WIFI_MAVLINK_MANAGEMENT) && !defined(USE_WIFI)
+    #error "USE_WIFI_MAVLINK_MANAGEMENT requires USE_WIFI to be defined"
 #endif
 
 #if defined(USE_WIFI_MDNS) && !defined(USE_WIFI)
@@ -83,8 +75,8 @@
 // OTA SUBSYSTEM DEPENDENCIES
 // =============================================================================
 
-#if defined(USE_OTA_WEB) && !defined(USE_WIFI_WEBSERVER)
-    #error "USE_OTA_WEB requires USE_WIFI_WEBSERVER to be defined"
+#if defined(USE_OTA_WEB) && !defined(USE_WIFI)
+    #error "USE_OTA_WEB requires USE_WIFI to be defined"
 #endif
 
 #if defined(USE_OTA_WEB) && !defined(USE_OTA)

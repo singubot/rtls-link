@@ -30,6 +30,7 @@ Do not rush to implementation. Phase 1 must complete first, with explicit user c
 7. Ask for explicit go-ahead.
 8. Do not start Phase 2 until the user confirms explicitly.
 NOTE: During the discussion phase, the user might ask you ( you can suggest him also ) to write down your investigations, analisys, reports, questions and clarifications to a markdown file inside `.agents/docs/<tile>.md`. This is interesting in order to keep records and important findings encountered during this discussion/planification phase. Feel free also to suggest to the user to write relevant documentation down if you see a clear benefit to doing so.
+IMPORTANT: If an Implementation Agreement is written down, keep it as a local working note only. Do not commit it, push it, link it, or list it as PR content unless the user explicitly asks for a permanent documentation artifact.
 IMPORTANT: Files created under `.agents/docs/` are local working notes only. Leave them untracked and never commit or push them upstream. If one is accidentally staged, remove it from the commit before proceeding.
 IMPORTANT: Do not place temporary investigation/report notes under tracked documentation paths (for example `docs/investigations/`) unless the user explicitly asks for a permanent documentation artifact to be committed.
 IMPORTANT: If temporary investigation files are found in tracked paths, keep them completely unstaged before committing and pushing.

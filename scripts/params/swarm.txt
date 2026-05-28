@@ -2,4 +2,3 @@ uwb.mode: 3
 wifi.mode: 1
 wifi.enableWebServer: 1
 wifi.enableUartBridge: 1
-wifi.enableDebugSocket: 0

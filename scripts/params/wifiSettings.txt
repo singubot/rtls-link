@@ -5,7 +5,6 @@ wifi.udpPort: 14550
 wifi.gcsIp: 192.168.4.5
 wifi.enableWebServer: 1
 wifi.enableUartBridge: 1
-wifi.enableDebugSocket: 0
 uwb.mode: 4
 uwb.anchorCount: 5
 uwb.devId1: 0

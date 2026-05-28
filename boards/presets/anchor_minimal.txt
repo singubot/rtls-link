@@ -5,8 +5,7 @@
 ; Use case: Fixed anchor stations, WiFi configuration only
 ;
 ; Features:
-;   - WiFi web server for configuration
-;   - WiFi discovery service
+;   - MAVLink UDP management/discovery
 ;   - Basic console for parameter access
 ;   - TDoA anchor mode only
 ;
@@ -22,8 +21,7 @@
 
 ; WiFi for configuration only
 -D USE_WIFI
--D USE_WIFI_WEBSERVER
--D USE_WIFI_DISCOVERY
+-D USE_WIFI_MAVLINK_MANAGEMENT
 
 ; OTA updates
 -D USE_OTA
