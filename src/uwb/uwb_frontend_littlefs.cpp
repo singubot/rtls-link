@@ -179,7 +179,10 @@ void UWBLittleFSFrontend::InitBackendForCurrentMode() {
 }
 
 void UWBLittleFSFrontend::Init() {
-    LittleFSFrontend<UWBParams>::Init();
+    const ErrorParam loadResult = LoadParams();
+    if (loadResult != ErrorParam::OK && loadResult != ErrorParam::FILE_NOT_FOUND) {
+        LOG_ERROR("UWB stored params rejected; continuing with previous/default runtime config");
+    }
     LOG_INFO("UWB frontend initializing");
 
 #ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
@@ -187,26 +190,40 @@ void UWBLittleFSFrontend::Init() {
         LOG_WARN("UWB backend disabled by parameter (uwb.uwbEnable=0)");
     } else {
         InitBackendForCurrentMode();
-        ApplyLoadedRuntimeConfig();
+        if (!ApplyLoadedRuntimeConfig()) {
+            LOG_ERROR("UWB stored runtime config rejected during initialization");
+        }
     }
 #else
     InitBackendForCurrentMode();
-    ApplyLoadedRuntimeConfig();
+    if (!ApplyLoadedRuntimeConfig()) {
+        LOG_ERROR("UWB stored runtime config rejected during initialization");
+    }
 #endif
 
     LOG_INFO("UWB frontend initialized");
 }
 
 ErrorParam UWBLittleFSFrontend::LoadParams() {
+    const UWBParams previousParams = m_Params;
     const ErrorParam result = LittleFSFrontend<UWBParams>::LoadParams();
     if (result == ErrorParam::OK) {
 #ifdef USE_RTLSLINK_BEACON_BACKEND
         if (!hasFiniteRtlslinkRuntimeConfig(m_Params)) {
             LOG_ERROR("Rejected stored UWB params with non-finite RTLSLink runtime config");
+            m_Params = previousParams;
             return ErrorParam::INVALID_DATA;
         }
 #endif
-        if (!ApplyLoadedRuntimeConfig()) {
+#ifdef USE_UWB_MODE_TDOA_TAG
+        if (m_Params.mode == UWBMode::TAG_TDOA && !UWBTagTDoA::ValidateStaticAnchors(GetAnchors())) {
+            LOG_ERROR("Rejected stored UWB params with invalid TAG_TDOA anchor geometry");
+            m_Params = previousParams;
+            return ErrorParam::INVALID_DATA;
+        }
+#endif
+        if (m_Backend != nullptr && !ApplyLoadedRuntimeConfig()) {
+            RestoreTagRuntimeState(previousParams, true, true, true);
             return ErrorParam::INVALID_DATA;
         }
     }
@@ -229,6 +246,40 @@ bool UWBLittleFSFrontend::ApplyLoadedRuntimeConfig()
     }
     rememberAcceptedStaticAnchorConfig(m_Params);
     return true;
+}
+
+bool UWBLittleFSFrontend::RestoreTagRuntimeState(const UWBParams& params,
+                                                 bool restoreEstimator,
+                                                 bool restoreRtlslinkBeacon,
+                                                 bool clearPendingDynamicBeacon)
+{
+    m_Params = params;
+    if (m_Params.mode != UWBMode::TAG_TDOA) {
+        return true;
+    }
+
+    bool restored = true;
+#if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
+    UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
+#endif
+#if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG) && defined(USE_RTLSLINK_BEACON_BACKEND)
+    if (clearPendingDynamicBeacon
+        && restoreRtlslinkBeacon
+        && m_Params.dynamicAnchorPosEnabled != 0
+        && UWBTagTDoA::IsDynamicPositioningEnabled()
+        && !UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
+        restored = ClearRtlslinkBeaconAnchors();
+        restoreRtlslinkBeacon = false;
+    }
+#else
+    (void)clearPendingDynamicBeacon;
+#endif
+
+    restored = ApplyTagRuntimeAnchorsTransaction(restoreEstimator, restoreRtlslinkBeacon) && restored;
+    if (!restored) {
+        LOG_WARN("Failed to fully restore UWB runtime state");
+    }
+    return restored;
 }
 
 bool UWBLittleFSFrontend::ApplyTagRuntimeAnchorsTransaction(bool applyEstimator, bool applyRtlslinkBeacon)
@@ -365,27 +416,11 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
                                            bool restoreEstimator,
                                            bool restoreRtlslinkBeacon,
                                            bool clearPendingDynamicBeacon = false) {
-        m_Params = rollbackParams;
+        RestoreTagRuntimeState(rollbackParams,
+                               restoreEstimator,
+                               restoreRtlslinkBeacon,
+                               clearPendingDynamicBeacon);
         const ErrorParam rollbackResult = SaveParams();
-        if (m_Params.mode == UWBMode::TAG_TDOA) {
-            bool restored = true;
-#if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG) && defined(USE_RTLSLINK_BEACON_BACKEND)
-            if (clearPendingDynamicBeacon
-                && restoreRtlslinkBeacon
-                && m_Params.dynamicAnchorPosEnabled != 0
-                && UWBTagTDoA::IsDynamicPositioningEnabled()
-                && !UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
-                restored = ClearRtlslinkBeaconAnchors();
-                restoreRtlslinkBeacon = false;
-            }
-#else
-            (void)clearPendingDynamicBeacon;
-#endif
-            restored = ApplyTagRuntimeAnchorsTransaction(restoreEstimator, restoreRtlslinkBeacon) && restored;
-            if (!restored) {
-                LOG_WARN("Failed to fully restore UWB runtime state after rejected parameter write");
-            }
-        }
         if (rollbackResult != ErrorParam::OK) {
             return rollbackResult;
         }

@@ -32,6 +32,10 @@ public:
 protected:
     void InitBackendForCurrentMode();
     bool ApplyLoadedRuntimeConfig();
+    bool RestoreTagRuntimeState(const UWBParams& params,
+                                bool restoreEstimator,
+                                bool restoreRtlslinkBeacon,
+                                bool clearPendingDynamicBeacon = false);
     bool ApplyTagRuntimeAnchorsTransaction(bool applyEstimator, bool applyRtlslinkBeacon);
     bool ClearRtlslinkBeaconAnchors();
     bool ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon);

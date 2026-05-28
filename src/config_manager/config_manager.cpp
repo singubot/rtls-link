@@ -11,6 +11,8 @@
 namespace {
 
 constexpr uint8_t kMaxConfigAnchors = 8;
+constexpr const char* kParamsFile = "/params.txt";
+constexpr const char* kParamsLoadBackupFile = "/params.load.bak";
 
 struct StoredAnchorConfig {
     bool devIdPresent = false;
@@ -551,25 +553,57 @@ ConfigError ConfigManager::LoadConfigNamed(const char* name) {
         return validationResult;
     }
 
+    const etl::string<MAX_NAME_LENGTH> previousActive = s_ActiveConfig;
+    const bool hadParamsFile = LittleFS.exists(kParamsFile);
+    LittleFS.remove(kParamsLoadBackupFile);
+    if (hadParamsFile && !CopyFile(kParamsFile, kParamsLoadBackupFile)) {
+        return ConfigError::FILE_SYSTEM_ERROR;
+    }
+
+    auto restorePreviousParams = [&]() {
+        bool restored = true;
+        if (hadParamsFile) {
+            restored = CopyFile(kParamsLoadBackupFile, kParamsFile);
+        } else {
+            restored = LittleFS.remove(kParamsFile) || !LittleFS.exists(kParamsFile);
+        }
+        LittleFS.remove(kParamsLoadBackupFile);
+        s_ActiveConfig = previousActive;
+        if (!SaveMetadata()) {
+            restored = false;
+        }
+        const ErrorParam restoreResult = Front::LoadAllParams();
+        if (restoreResult != ErrorParam::OK && restoreResult != ErrorParam::FILE_NOT_FOUND) {
+            restored = false;
+        }
+        return restored;
+    };
+
     // Copy config file to params.txt
-    if (!CopyFile(configPath.c_str(), "/params.txt")) {
+    if (!CopyFile(configPath.c_str(), kParamsFile)) {
+        restorePreviousParams();
         return ConfigError::FILE_SYSTEM_ERROR;
     }
 
     // Update active config
     s_ActiveConfig.assign(name);
-    SaveMetadata();
+    if (!SaveMetadata()) {
+        restorePreviousParams();
+        return ConfigError::FILE_SYSTEM_ERROR;
+    }
 
     // Reload all parameters and check for errors
     ErrorParam loadResult = Front::LoadAllParams();
     if (loadResult != ErrorParam::OK && loadResult != ErrorParam::FILE_NOT_FOUND) {
         LOG_WARN("ConfigManager: Failed to reload parameters after loading config");
+        restorePreviousParams();
         if (loadResult == ErrorParam::INVALID_DATA) {
             return ConfigError::INVALID_CONFIG;
         }
         return ConfigError::FILE_SYSTEM_ERROR;
     }
 
+    LittleFS.remove(kParamsLoadBackupFile);
     LOG_INFO("ConfigManager: Loaded config '%s'", name);
     return ConfigError::OK;
 }
