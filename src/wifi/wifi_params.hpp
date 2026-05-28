@@ -9,7 +9,8 @@
 
 static constexpr uint32_t MAX_SSID_LENGTH = 32;
 static constexpr uint32_t MAX_PSWD_LENGTH = 64;
-static constexpr uint32_t MAX_IP_LENGTH = 15;
+static constexpr uint32_t MAX_IP_LENGTH = 16;
+static_assert(MAX_IP_LENGTH >= 16, "IPv4 buffers must hold 15 characters plus NUL");
 
 enum class WifiMode : uint8_t {
     AP,
@@ -31,8 +32,6 @@ struct WifiParams {
     uint16_t udpPort;               // Port of the device UDP server (Used for the UartBridge)
     uint8_t enableWebServer = 1;    // Enable temporary HTTP OTA server
     uint8_t enableUartBridge = 1;   // Enable the UART bridge (Bridge between serial port and UDP port)
-    uint8_t enableMavlinkManagement = 1; // Enable MAVLink-over-UDP management service
-    uint16_t mavlinkManagementPort = 3333; // UDP port for MAVLink management/discovery
     // Logging parameters
     uint16_t logUdpPort = 3334;     // UDP port for debug log streaming
     uint8_t logSerialEnabled = 1;   // Runtime: enable Serial log output (default: on)

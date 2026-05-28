@@ -1114,8 +1114,13 @@ bool UWBTagTDoA::IsDynamicPositioningEnabled() {
     return s_useDynamicPositions;
 }
 
+bool UWBTagTDoA::AreDynamicAnchorPositionsReady() {
+    return s_useDynamicPositions &&
+           s_dynamicPositionsReadyForEstimator.load(std::memory_order_relaxed);
+}
+
 uint8_t UWBTagTDoA::GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8_t maxCount) {
-    if (!s_useDynamicPositions || out == nullptr || maxCount == 0) {
+    if (!AreDynamicAnchorPositionsReady() || out == nullptr || maxCount == 0) {
         return 0;
     }
 

@@ -63,6 +63,7 @@ public:
      * @return true if enabled
      */
     static bool IsDynamicPositioningEnabled();
+    static bool AreDynamicAnchorPositionsReady();
 
     /**
      * @brief Get the calculated dynamic anchor positions.

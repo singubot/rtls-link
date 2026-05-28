@@ -18,8 +18,6 @@ static constexpr RegistryEntry kEntries[] = {
     {"WIFI_UART_PORT", "wifi", "udpPort"},
     {"WIFI_OTA_EN", "wifi", "enableWebServer"},
     {"WIFI_UART_EN", "wifi", "enableUartBridge"},
-    {"WIFI_MGMT_EN", "wifi", "enableMavlinkManagement"},
-    {"WIFI_MGMT_PORT", "wifi", "mavlinkManagementPort"},
     {"WIFI_LOG_PORT", "wifi", "logUdpPort"},
     {"WIFI_LOG_SER", "wifi", "logSerialEnabled"},
     {"WIFI_LOG_UDP", "wifi", "logUdpEnabled"},

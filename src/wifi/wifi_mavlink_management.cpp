@@ -13,6 +13,9 @@
 #include "logging/logging.hpp"
 #include "param_registry.hpp"
 #include "protocol/rtls_binary_protocol.hpp"
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+#include "protocol/tdoa_anchor_stats_frame.hpp"
+#endif
 #include "uwb/uwb_frontend_littlefs.hpp"
 #include "version.hpp"
 
@@ -128,9 +131,8 @@ uint8_t resultFromStatus(rtls::protocol::StatusCode status)
 
 } // namespace
 
-WifiMavlinkManagement::WifiMavlinkManagement(uint16_t port, const WifiParams& wifiParams)
-    : m_Port(port)
-    , m_WifiParams(wifiParams)
+WifiMavlinkManagement::WifiMavlinkManagement(const WifiParams& wifiParams)
+    : m_WifiParams(wifiParams)
     , m_ParseStatus(new mavlink_status_t{})
 {
     if (m_Udp.begin(m_Port) == 1) {
@@ -160,6 +162,10 @@ void WifiMavlinkManagement::Update()
         SendHeartbeat();
         SendDeviceStatus();
     }
+
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    UpdateAnchorTelemetry();
+#endif
 }
 
 void WifiMavlinkManagement::ProcessPacket()
@@ -299,6 +305,14 @@ void WifiMavlinkManagement::HandleRtlsCommand(const mavlink_message_t& message)
 
     CommandBinaryFrame binaryResponse;
     if (CommandHandler::TryExecuteBinaryCommand(commandString, binaryResponse)) {
+        if (binaryResponse.Truncated()) {
+            SendTextResponse(command.request_id,
+                             command.command,
+                             RTLS_RESULT_FAILED,
+                             "Command response exceeded MAVLink management buffer");
+            return;
+        }
+
         const uint8_t status = binaryResponse.Size() >= rtls::protocol::kFrameHeaderSize
             ? binaryResponse.Data()[8]
             : static_cast<uint8_t>(rtls::protocol::StatusCode::Error);
@@ -317,6 +331,74 @@ void WifiMavlinkManagement::HandleRtlsCommand(const mavlink_message_t& message)
                      result.startsWith("Error") ? RTLS_RESULT_FAILED : RTLS_RESULT_ACCEPTED,
                      result.c_str());
 }
+
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+void WifiMavlinkManagement::UpdateAnchorTelemetry()
+{
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+    if (uwbParams.mode != UWBMode::ANCHOR_TDOA ||
+        uwbParams.uwbEnable == 0 ||
+        uwbParams.tdoaAnchorTelemetryEnable == 0 ||
+        uwbParams.tdoaAnchorTelemetryPort == 0) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (now - m_LastAnchorTelemetryMs < GetAnchorTelemetryIntervalMs()) {
+        return;
+    }
+    m_LastAnchorTelemetryMs = now;
+
+    SendAnchorTelemetry();
+}
+
+uint16_t WifiMavlinkManagement::GetAnchorTelemetryIntervalMs() const
+{
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+    if (uwbParams.tdoaAnchorTelemetryIntervalMs < kAnchorTelemetryMinIntervalMs) {
+        return kAnchorTelemetryMinIntervalMs;
+    }
+    if (uwbParams.tdoaAnchorTelemetryIntervalMs > kAnchorTelemetryMaxIntervalMs) {
+        return kAnchorTelemetryMaxIntervalMs;
+    }
+    return uwbParams.tdoaAnchorTelemetryIntervalMs;
+}
+
+void WifiMavlinkManagement::SendAnchorTelemetry()
+{
+    IPAddress gcsIp;
+    if (!gcsIp.fromString(m_WifiParams.gcsIp.data())) {
+        return;
+    }
+
+    uwbTdoa2AnchorStats_t stats = {};
+    if (!uwbTdoa2AnchorGetStats(&stats)) {
+        return;
+    }
+
+    rtls::protocol::BinaryFrameBuilder<512> frame;
+    rtls::protocol::AppendTdoaAnchorStatsFrame(frame, stats);
+
+    static bool truncationWarned = false;
+    if (frame.Truncated() && !truncationWarned) {
+        LOG_WARN("MAVLink management anchor telemetry frame truncated");
+        truncationWarned = true;
+    }
+
+    const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
+    const int beginResult = m_Udp.beginPacket(gcsIp, uwbParams.tdoaAnchorTelemetryPort);
+    const size_t bytesWritten = beginResult ? m_Udp.write(frame.Data(), frame.Size()) : 0;
+    const int endResult = beginResult ? m_Udp.endPacket() : 0;
+    if ((!beginResult || bytesWritten != frame.Size() || !endResult) && !m_AnchorTelemetrySendWarned) {
+        LOG_WARN("MAVLink management anchor telemetry UDP send failed begin=%d written=%u/%u end=%d",
+                 beginResult,
+                 static_cast<unsigned int>(bytesWritten),
+                 static_cast<unsigned int>(frame.Size()),
+                 endResult);
+        m_AnchorTelemetrySendWarned = true;
+    }
+}
+#endif
 
 void WifiMavlinkManagement::SendHeartbeat()
 {

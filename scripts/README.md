@@ -11,8 +11,7 @@ cargo build --release -p rtls-link-cli
 ./target/release/rtls-link-cli config apply <device-ip> ../../scripts/params/tagHome.txt
 ```
 
-## 3D Data visualizer
+## Telemetry visualization
 
-`python3 indoor_loc.py 192.168.4.1 23`
-`python script.py 192.168.4.1 23 indoor_loc_config/config-3D.json`
-`python script.py 192.168.4.1 23 indoor_loc_config/config-2D.json`
+The old TCP debug visualizer was removed with the TCP debug backend. Use the
+manager CLI and UDP/MAVLink telemetry paths for validation.

@@ -17,7 +17,9 @@ typedef struct __mavlink_status mavlink_status_t;
 
 class WifiMavlinkManagement : public WifiBackend {
 public:
-    WifiMavlinkManagement(uint16_t port, const WifiParams& wifiParams);
+    static constexpr uint16_t kManagementPort = 3333;
+
+    explicit WifiMavlinkManagement(const WifiParams& wifiParams);
     ~WifiMavlinkManagement() override;
 
     void Update() override;
@@ -30,6 +32,11 @@ private:
     void HandleParamExtRequestRead(const mavlink_message_t& message);
     void HandleParamExtSet(const mavlink_message_t& message);
     void HandleRtlsCommand(const mavlink_message_t& message);
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    void UpdateAnchorTelemetry();
+    uint16_t GetAnchorTelemetryIntervalMs() const;
+    void SendAnchorTelemetry();
+#endif
 
     void SendHeartbeat();
     void SendDeviceStatus();
@@ -48,15 +55,23 @@ private:
 private:
     static constexpr uint32_t kStatusIntervalMs = 1000;
     static constexpr size_t kRxBufferSize = 512;
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    static constexpr uint16_t kAnchorTelemetryMinIntervalMs = 250;
+    static constexpr uint16_t kAnchorTelemetryMaxIntervalMs = 60000;
+#endif
 
     WiFiUDP m_Udp;
-    uint16_t m_Port;
+    uint16_t m_Port = kManagementPort;
     const WifiParams& m_WifiParams;
     IPAddress m_RemoteIp;
     uint16_t m_RemotePort = 0;
     uint32_t m_LastStatusMs = 0;
     mavlink_status_t* m_ParseStatus = nullptr;
     TelemetryCallback m_TelemetryCallback;
+#if defined(USE_UWB_ANCHOR_TELEMETRY) && defined(USE_UWB_MODE_TDOA_ANCHOR)
+    uint32_t m_LastAnchorTelemetryMs = 0;
+    bool m_AnchorTelemetrySendWarned = false;
+#endif
 };
 
 #endif // USE_WIFI_MAVLINK_MANAGEMENT

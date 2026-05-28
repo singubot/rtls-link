@@ -108,7 +108,7 @@ static DeviceTelemetry GetDeviceTelemetry() {
     // Dynamic anchor positions (for TDoA tag mode with dynamic positioning enabled)
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
     if (uwbParams.mode == UWBMode::TAG_TDOA) {
-        t.dynamic_anchors_enabled = UWBTagTDoA::IsDynamicPositioningEnabled();
+        t.dynamic_anchors_enabled = UWBTagTDoA::AreDynamicAnchorPositionsReady();
         if (t.dynamic_anchors_enabled) {
             t.dynamic_anchor_count = UWBTagTDoA::GetDynamicAnchorPositions(
                 t.dynamic_anchors, 4);
@@ -160,6 +160,9 @@ void WifiLittleFSFrontend::Init() {
 }
 
 void WifiLittleFSFrontend::Update() {
+    bool applyModeUpdate = false;
+    WifiMode pendingMode = WifiMode::UNDEFINED;
+    bool applyNetworkServicesSetup = false;
     {
         BackendsLockGuard lock(m_backendsMutex);
         if (!lock.IsLocked()) {
@@ -167,11 +170,25 @@ void WifiLittleFSFrontend::Update() {
             return;
         }
 
+        m_updatingBackends = true;
         for (WifiBackend* backend : m_Backends) {
             backend->Update();
         }
+        m_updatingBackends = false;
+
+        applyModeUpdate = m_pendingModeUpdate;
+        pendingMode = m_pendingMode;
+        applyNetworkServicesSetup = m_pendingNetworkServicesSetup;
+        m_pendingModeUpdate = false;
+        m_pendingMode = WifiMode::UNDEFINED;
+        m_pendingNetworkServicesSetup = false;
     }
-    
+
+    if (applyModeUpdate) {
+        UpdateMode(pendingMode);
+    } else if (applyNetworkServicesSetup && NetworkServicesActive()) {
+        SetupNetworkServices();
+    }
 }
 
 bool WifiLittleFSFrontend::SetupAP() {
@@ -218,17 +235,15 @@ void WifiLittleFSFrontend::SetupNetworkServices() {
 #endif
     }
 
-    if (m_Params.enableMavlinkManagement) {
 #ifdef USE_WIFI_MAVLINK_MANAGEMENT
-        WifiMavlinkManagement* management = new WifiMavlinkManagement(m_Params.mavlinkManagementPort, m_Params);
-        management->SetTelemetryCallback(TelemetryCallback::create<&GetDeviceTelemetry>());
-        m_Backends.push_back(management);
-        LOG_INFO("MAVLink management enabled on UDP port %u",
-                 static_cast<unsigned int>(m_Params.mavlinkManagementPort));
+    WifiMavlinkManagement* management = new WifiMavlinkManagement(m_Params);
+    management->SetTelemetryCallback(TelemetryCallback::create<&GetDeviceTelemetry>());
+    m_Backends.push_back(management);
+    LOG_INFO("MAVLink management enabled on UDP port %u",
+             static_cast<unsigned int>(WifiMavlinkManagement::kManagementPort));
 #else
-        LOG_WARN("MAVLink management requested but USE_WIFI_MAVLINK_MANAGEMENT not compiled");
+    LOG_WARN("MAVLink management requested but USE_WIFI_MAVLINK_MANAGEMENT not compiled");
 #endif
-    }
 
     if (m_Params.enableUartBridge) {
 #ifdef USE_WIFI_UART_BRIDGE
@@ -318,6 +333,34 @@ void WifiLittleFSFrontend::ApplyLoggingSettings() {
 #endif
 }
 
+bool WifiLittleFSFrontend::NetworkServicesActive() const {
+    return m_currentMode == WifiMode::AP ||
+           (m_currentMode == WifiMode::STATION && m_stationConnected);
+}
+
+void WifiLittleFSFrontend::RequestModeUpdate(WifiMode mode) {
+    if (m_updatingBackends) {
+        m_pendingModeUpdate = true;
+        m_pendingMode = mode;
+        return;
+    }
+
+    UpdateMode(mode);
+}
+
+void WifiLittleFSFrontend::RequestNetworkServicesSetup() {
+    if (!NetworkServicesActive()) {
+        return;
+    }
+
+    if (m_updatingBackends) {
+        m_pendingNetworkServicesSetup = true;
+        return;
+    }
+
+    SetupNetworkServices();
+}
+
 ErrorParam WifiLittleFSFrontend::SetParam(const char* name, const void* data, uint32_t len) {
     // Call base class implementation first
     ErrorParam result = LittleFSFrontend<WifiParams>::SetParam(name, data, len);
@@ -328,24 +371,19 @@ ErrorParam WifiLittleFSFrontend::SetParam(const char* name, const void* data, ui
 
     // Apply mode changes immediately when requested.
     if (strcmp(name, "mode") == 0) {
-        UpdateMode(m_Params.mode);
+        RequestModeUpdate(m_Params.mode);
     }
 
-    // Reconfigure runtime WiFi services immediately when bridge/server/management
-    // parameters are updated and networking is currently active.
+    // Reconfigure runtime WiFi services when bridge/server parameters are updated
+    // and networking is currently active.
     // gcsIp is intentionally excluded: MAVLink management reads it live every
     // heartbeat, and tearing down AsyncWebServer + rebinding port 80 occasionally
     // fails to re-bind, leaving HTTP OTA dead until reboot. UART bridge keeps its old gcsIp
     // until explicit toggle or reboot, which is the safer trade-off.
     if (strcmp(name, "enableWebServer") == 0 ||
         strcmp(name, "enableUartBridge") == 0 ||
-        strcmp(name, "enableMavlinkManagement") == 0 ||
-        strcmp(name, "udpPort") == 0 ||
-        strcmp(name, "mavlinkManagementPort") == 0) {
-        if (m_currentMode == WifiMode::AP ||
-            (m_currentMode == WifiMode::STATION && m_stationConnected)) {
-            SetupNetworkServices();
-        }
+        strcmp(name, "udpPort") == 0) {
+        RequestNetworkServicesSetup();
     }
 
     // Check if this was a logging-related parameter and apply changes.

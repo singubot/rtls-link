@@ -36,6 +36,9 @@ private:
     void ClearBackends();
     void ClearBackendsUnlocked();
     void ApplyLoggingSettings();
+    bool NetworkServicesActive() const;
+    void RequestModeUpdate(WifiMode mode);
+    void RequestNetworkServicesSetup();
 
     static constexpr uint32_t maxClients = 10;
 
@@ -43,6 +46,10 @@ private:
     SemaphoreHandle_t m_backendsMutex = nullptr;
     WifiMode m_currentMode = WifiMode::UNDEFINED;
     bool m_stationConnected = false;
+    bool m_updatingBackends = false;
+    bool m_pendingNetworkServicesSetup = false;
+    bool m_pendingModeUpdate = false;
+    WifiMode m_pendingMode = WifiMode::UNDEFINED;
 
 public:
     static constexpr ParamDef s_ParamDefs[] = {
@@ -55,8 +62,6 @@ public:
         PARAM_DEF(WifiParams, udpPort),
         PARAM_DEF(WifiParams, enableWebServer),
         PARAM_DEF(WifiParams, enableUartBridge),
-        PARAM_DEF(WifiParams, enableMavlinkManagement),
-        PARAM_DEF(WifiParams, mavlinkManagementPort),
         PARAM_DEF(WifiParams, logUdpPort),
         PARAM_DEF(WifiParams, logSerialEnabled),
         PARAM_DEF(WifiParams, logUdpEnabled)
