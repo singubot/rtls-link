@@ -51,6 +51,7 @@ public:
     static String ExportAnchorModelJson();
     static String GetEstimatorStatsJson();
     static void ResetEstimatorStats();
+    static bool ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors);
     static bool ApplyStaticAnchors(etl::span<const UWBAnchorParam> anchors);
 #ifdef ESP32S3_UWB_BOARD
     static void ApplyMatcherPolicy(uint8_t policy);
@@ -74,7 +75,7 @@ public:
     static void ApplyDynamicAnchorPositioningEnabled(uint8_t enabled);
     static bool AreDynamicPositionsReadyForEstimator();
 #ifdef USE_RTLSLINK_BEACON_BACKEND
-    static void ConfigureRtlslinkBeaconFromCurrentAnchors();
+    static bool ConfigureRtlslinkBeaconFromCurrentAnchors();
 #endif
 #endif
 

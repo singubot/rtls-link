@@ -754,9 +754,9 @@ void App::SendSample(float x_m, float y_m, float z_m,
 #endif // HAS_POSITION_OUTPUT
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
-void App::ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam> anchors)
+bool App::ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam> anchors)
 {
-  app.rtlslink_beacon_backend_.ConfigureAnchors(anchors, Front::uwbLittleFSFront.GetParams().rotationDegrees);
+  return app.rtlslink_beacon_backend_.ConfigureAnchors(anchors, Front::uwbLittleFSFront.GetParams().rotationDegrees);
 }
 
 void App::SendTdoaMeasurement(uint8_t anchor_a,

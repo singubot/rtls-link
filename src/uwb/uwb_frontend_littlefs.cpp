@@ -192,6 +192,14 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
         return true;
     }
 
+    auto anchors = GetAnchors();
+
+#ifdef USE_UWB_MODE_TDOA_TAG
+    if (applyEstimator && !UWBTagTDoA::ValidateStaticAnchors(anchors)) {
+        return false;
+    }
+#endif
+
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
     const bool dynamicParamEnabled = (m_Params.dynamicAnchorPosEnabled != 0);
     const bool dynamicRunning = UWBTagTDoA::IsDynamicPositioningEnabled();
@@ -201,13 +209,15 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
                 LOG_INFO("Static anchor config saved; dynamic anchor positioning is active");
             }
 #ifdef USE_RTLSLINK_BEACON_BACKEND
+            bool beaconConfigured = true;
             if (applyRtlslinkBeacon) {
-                UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors();
+                beaconConfigured = UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors();
             }
 #else
+            const bool beaconConfigured = true;
             (void)applyRtlslinkBeacon;
 #endif
-            return true;
+            return beaconConfigured;
         }
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
@@ -225,8 +235,6 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
     }
 #endif
 
-    auto anchors = GetAnchors();
-
     bool estimatorApplied = true;
 #ifdef USE_UWB_MODE_TDOA_TAG
     if (applyEstimator) {
@@ -242,7 +250,10 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
             LOG_WARN("RTLSLink beacon static anchor config skipped - estimator apply failed");
             return false;
         }
-        App::ConfigureRtlslinkBeaconAnchors(anchors);
+        if (!App::ConfigureRtlslinkBeaconAnchors(anchors)) {
+            LOG_WARN("RTLSLink beacon static anchor config skipped - backend busy or rejected config");
+            return false;
+        }
     }
 #else
     (void)applyRtlslinkBeacon;
@@ -304,11 +315,32 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
     if (strcmp(name, "dynamicAnchorPosEnabled") == 0 && m_Params.mode == UWBMode::TAG_TDOA) {
-        UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
-        if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
-            ApplyStaticAnchorsToLiveBackends(false, true);
+        bool transitionApplied = true;
+        if (m_Params.dynamicAnchorPosEnabled == 0) {
+            transitionApplied = ApplyStaticAnchorsToLiveBackends(true, true);
+            if (transitionApplied) {
+                UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
+                rememberAcceptedStaticAnchorConfig(m_Params);
+            }
         } else {
-            ApplyStaticAnchorsToLiveBackends(true, true);
+            UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
+            if (UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
+                transitionApplied = ApplyStaticAnchorsToLiveBackends(false, true);
+            } else {
+                transitionApplied = ApplyStaticAnchorsToLiveBackends(true, true);
+                if (transitionApplied) {
+                    rememberAcceptedStaticAnchorConfig(m_Params);
+                }
+            }
+        }
+        if (!transitionApplied) {
+            LOG_ERROR("Rejected dynamic anchor positioning change; restoring previous UWB params");
+            m_Params = previousParams;
+            const ErrorParam rollbackResult = SaveParams();
+            if (rollbackResult != ErrorParam::OK) {
+                return rollbackResult;
+            }
+            return ErrorParam::INVALID_DATA;
         }
     }
 #endif
@@ -324,6 +356,7 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
                 LOG_ERROR("Rejected invalid UWB static anchor config; restoring previous accepted anchors");
                 restoreAcceptedStaticAnchorConfig(m_Params, previousParams);
                 const ErrorParam rollbackResult = SaveParams();
+                ApplyStaticAnchorsToLiveBackends(true, true);
                 if (rollbackResult != ErrorParam::OK) {
                     return rollbackResult;
                 }

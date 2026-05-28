@@ -125,14 +125,14 @@ static etl::array<bool, kNumAnchors> configured_anchor_ids = {};
 static std::atomic<bool> s_estimatorReinitRequested{false};
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_RTLSLINK_BEACON_BACKEND)
-static void configureRtlslinkBeaconFromAnchorPositions()
+static bool configureRtlslinkBeaconFromAnchorPositions()
 {
     etl::array<UWBAnchorParam, kDynamicAnchorCount> dynamic_anchors = {};
     uint8_t dynamic_anchor_count = 0;
 
     if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
         LOG_WARN("RTLSLink beacon dynamic anchor config skipped - mutex busy");
-        return;
+        return false;
     }
 
     for (uint8_t id = 0; id < kDynamicAnchorCount; id++) {
@@ -146,13 +146,16 @@ static void configureRtlslinkBeaconFromAnchorPositions()
 
     if (dynamic_anchor_count == 0) {
         LOG_WARN("RTLSLink beacon dynamic anchor config skipped - no anchors");
-        return;
+        return false;
     }
 
-    App::ConfigureRtlslinkBeaconAnchors(
+    const bool configured = App::ConfigureRtlslinkBeaconAnchors(
         etl::span<const UWBAnchorParam>(dynamic_anchors.data(), dynamic_anchor_count));
-    LOG_INFO("RTLSLink beacon configured from dynamic anchor positions (%u anchors)",
-             static_cast<unsigned int>(dynamic_anchor_count));
+    if (configured) {
+        LOG_INFO("RTLSLink beacon configured from dynamic anchor positions (%u anchors)",
+                 static_cast<unsigned int>(dynamic_anchor_count));
+    }
+    return configured;
 }
 #endif
 
@@ -176,11 +179,11 @@ static void clearFreshMeasurementsLocked()
     fresh_pair_count.store(0, std::memory_order_relaxed);
 }
 
-static bool applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors, uint8_t& configuredOut)
+static bool buildStaticAnchorConfig(etl::span<const UWBAnchorParam> anchors,
+                                    etl::array<UWBAnchorParam, kNumAnchors>& next_anchor_positions,
+                                    etl::array<bool, kNumAnchors>& next_configured_anchor_ids,
+                                    uint8_t& configuredOut)
 {
-    etl::array<UWBAnchorParam, kNumAnchors> next_anchor_positions = {};
-    etl::array<bool, kNumAnchors> next_configured_anchor_ids = {};
-
     uint8_t configured = 0;
     uint8_t max_anchor_id = 0;
     for (const auto& anchor : anchors) {
@@ -223,10 +226,24 @@ static bool applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors, ui
         return false;
     }
 
+    configuredOut = configured;
+    return true;
+}
+
+static bool applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors, uint8_t& configuredOut)
+{
+    etl::array<UWBAnchorParam, kNumAnchors> next_anchor_positions = {};
+    etl::array<bool, kNumAnchors> next_configured_anchor_ids = {};
+    if (!buildStaticAnchorConfig(anchors,
+                                 next_anchor_positions,
+                                 next_configured_anchor_ids,
+                                 configuredOut)) {
+        return false;
+    }
+
     anchor_positions = next_anchor_positions;
     configured_anchor_ids = next_configured_anchor_ids;
     clearFreshMeasurementsLocked();
-    configuredOut = configured;
     return true;
 }
 
@@ -817,6 +834,17 @@ bool UWBTagTDoA::ApplyStaticAnchors(etl::span<const UWBAnchorParam> anchors)
     return true;
 }
 
+bool UWBTagTDoA::ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors)
+{
+    etl::array<UWBAnchorParam, kNumAnchors> next_anchor_positions = {};
+    etl::array<bool, kNumAnchors> next_configured_anchor_ids = {};
+    uint8_t configured = 0;
+    return buildStaticAnchorConfig(anchors,
+                                   next_anchor_positions,
+                                   next_configured_anchor_ids,
+                                   configured);
+}
+
 #ifdef ESP32S3_UWB_BOARD
 void UWBTagTDoA::ApplyMatcherPolicy(uint8_t policy)
 {
@@ -1248,8 +1276,8 @@ void UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(uint8_t enabled) {
 }
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
-void UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors() {
-    configureRtlslinkBeaconFromAnchorPositions();
+bool UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors() {
+    return configureRtlslinkBeaconFromAnchorPositions();
 }
 #endif
 

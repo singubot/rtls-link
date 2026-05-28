@@ -21,7 +21,7 @@ public:
     void Init(uint32_t baudrate, size_t tx_buffer_size);
     void Update();
 
-    void ConfigureAnchors(etl::span<const UWBAnchorParam> anchors, float rotation_degrees);
+    bool ConfigureAnchors(etl::span<const UWBAnchorParam> anchors, float rotation_degrees);
     void SendPosition(float x_m, float y_m, float z_m);
     bool EnqueueTdoa(uint8_t anchor_a,
                      uint8_t anchor_b,

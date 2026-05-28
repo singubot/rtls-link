@@ -38,7 +38,7 @@ void RTLSLinkBeaconBackend::Init(uint32_t baudrate, size_t tx_buffer_size)
     LOG_INFO("RTLSLink beacon backend ready at %lu baud", static_cast<unsigned long>(baudrate));
 }
 
-void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anchors, float rotation_degrees)
+bool RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anchors, float rotation_degrees)
 {
     etl::array<Anchor, kMaxAnchors> next_anchors = {};
     uint8_t max_anchor_id = 0;
@@ -112,12 +112,12 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
     }
     if (invalid_config) {
         LOG_WARN("RTLSLink beacon keeping previous anchor config");
-        return;
+        return false;
     }
 
     if (config_mutex_ == nullptr || xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
         LOG_WARN("RTLSLink beacon config skipped - mutex busy");
-        return;
+        return false;
     }
 
     anchors_ = next_anchors;
@@ -130,6 +130,7 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
     LOG_INFO("RTLSLink beacon configured %u anchors (count=%u)",
              static_cast<unsigned int>(configured),
              static_cast<unsigned int>(anchor_count_));
+    return true;
 }
 
 void RTLSLinkBeaconBackend::Update()

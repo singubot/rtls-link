@@ -59,7 +59,7 @@ public:
 #endif
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
-    static void ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam> anchors);
+    static bool ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam> anchors);
     static void SendTdoaMeasurement(uint8_t anchor_a,
                                     uint8_t anchor_b,
                                     float distance_diff_m,
