@@ -1,0 +1,33 @@
+{
+  "name": "feature-dev",
+  "version": "0.1.0",
+  "description": "Discuss, align, implement in a worktree, and open a draft PR for a new feature.",
+  "author": {
+    "name": "MarcEspuna",
+    "email": "mespuna@cactusiot.com",
+    "url": "https://github.com/mespunaiot"
+  },
+  "repository": "https://github.com/marcespuna99/codex-extensions",
+  "keywords": [
+    "feature",
+    "workflow",
+    "pull-request"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Feature Dev",
+    "shortDescription": "Plan and deliver features through a draft PR workflow.",
+    "longDescription": "Guides Codex through mandatory alignment, worktree-based implementation, validation, review, commit, push, and draft PR creation for new feature work.",
+    "developerName": "Mespuna IoT",
+    "category": "Development",
+    "capabilities": [
+      "Read",
+      "Write",
+      "GitHub"
+    ],
+    "defaultPrompt": [
+      "Use feature-dev for this feature: "
+    ],
+    "brandColor": "#2563EB"
+  }
+}

@@ -107,3 +107,8 @@ ESP32 environments use:
 - When adding a new functionality from scratch. Always create a new branch called `feature/<title>` before starting to write the code.
 - Always when adding a new feature to the firmware ( basically src folder ) you need to maintain in "sync" compatibility with the new feature of the desktop app that you can find inside `tools/rtls-link-manager`. The rtls-link-manager is a git submodule with it's own repository. You should create there the same corresponding branch. When opening the PRs, on the rtls-link repository, you should add a link with the matching feature PR of the `rtls-link-manager`.
 - The repo has a special features file called `user_defines.txt` where it introduces all the feature flags included on the build. When adding a new feature make sure to add it to the `user_defines.txt`. All features should be there, if disables it should simply be commented out.
+
+# General code guidelines
+- Simplicity is key. That does not mean less features. Achiveing the same thing but in a simpler and shorter way is highly valuable. Elegant and simple solutions is what we should look for. Over verbosity code changes will be rejected.
+- This is a resource limited MCUs, we should handle memory resources and CPU time eficiently. Actively look and analize the final output binaries in order to identify potential areas of improvement. Use modern C++, avoid dynamic memory where possible and string usage/manipulation.
+- Suggest refactors if a new feature starts adding to much friction and complexity. The code should be eficient, clear and easy to understand and it should look simple for the amount of things it supports.

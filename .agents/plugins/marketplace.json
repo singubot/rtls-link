@@ -1,0 +1,32 @@
+{
+  "name": "rtls-link-codex-extensions",
+  "interface": {
+    "displayName": "RTLS Link Codex Extensions"
+  },
+  "plugins": [
+    {
+      "name": "feature-dev",
+      "source": {
+        "source": "local",
+        "path": "./plugins/feature-dev"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "solve-pr-comments",
+      "source": {
+        "source": "local",
+        "path": "./plugins/solve-pr-comments"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

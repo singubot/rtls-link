@@ -1,0 +1,33 @@
+{
+  "name": "solve-pr-comments",
+  "version": "0.1.0",
+  "description": "Triage, fix, reply to, and resolve GitHub PR review comments.",
+  "author": {
+    "name": "MarcEspuna",
+    "email": "mespuna@cactusiot.com",
+    "url": "https://github.com/mespunaiot"
+  },
+  "repository": "https://github.com/marcespuna99/codex-extensions",
+  "keywords": [
+    "github",
+    "pull-request",
+    "review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Solve PR Comments",
+    "shortDescription": "Address GitHub PR review comments with replies and fixes.",
+    "longDescription": "Guides Codex through gathering PR review threads, judging each comment, fixing accurate findings, replying to inaccurate findings, pushing fixes, and resolving threads.",
+    "developerName": "Mespuna IoT",
+    "category": "Development",
+    "capabilities": [
+      "Read",
+      "Write",
+      "GitHub"
+    ],
+    "defaultPrompt": [
+      "Use solve-pr-comments for PR #"
+    ],
+    "brandColor": "#16A34A"
+  }
+}
