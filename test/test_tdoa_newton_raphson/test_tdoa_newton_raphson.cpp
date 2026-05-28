@@ -218,7 +218,7 @@ TEST_F(TDOANewtonRaphsonTest, EightAnchorAllPairs3D) {
     tdoa_estimator::PosVector3D initialGuess = calculateInitialGuess(anchors);
 
     auto result = tdoa_estimator::newtonRaphson(
-        anchorPositionsLeft, anchorPositionsRight, tdoas, initialGuess, 15);
+        anchorPositionsLeft, anchorPositionsRight, tdoas, initialGuess, 10);
 
     Scalar error = (result.position - truePosition).norm();
     std::cout << "8-anchor all-pairs err=" << error

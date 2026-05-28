@@ -101,6 +101,7 @@ using PairSlot = tdoa::MeasurementSlot;
 
 static constexpr size_t kMin3DMeasurementsForSolve = 5;
 static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 5;
+static constexpr uint64_t kMax3DBatchSpanUs = 120000;
 static constexpr tdoa_estimator::Scalar kMax3DPositionVarianceM2 = 9.0f;
 
 static bool is3DCovarianceAcceptable(const tdoa_estimator::CovMatrix3D& covariance)
@@ -174,63 +175,58 @@ static void clearFreshMeasurementsLocked()
     fresh_pair_count.store(0, std::memory_order_relaxed);
 }
 
-static uint8_t applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors)
+static bool applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors, uint8_t& configuredOut)
 {
-    anchor_positions.fill({});
-    configured_anchor_ids.fill(false);
+    etl::array<UWBAnchorParam, kNumAnchors> next_anchor_positions = {};
+    etl::array<bool, kNumAnchors> next_configured_anchor_ids = {};
 
     uint8_t configured = 0;
     uint8_t max_anchor_id = 0;
-    bool invalid_config = false;
     for (const auto& anchor : anchors) {
         uint8_t anchorId = 0;
         if (!tdoa::ParseAnchorId(anchor.shortAddr, anchorId) || anchorId >= kNumAnchors) {
             LOG_ERROR("Rejected static anchor config: invalid short address '%c%c' (expected 0-7)",
                      anchor.shortAddr[0], anchor.shortAddr[1]);
-            invalid_config = true;
-            break;
+            return false;
         }
-        if (configured_anchor_ids[anchorId]) {
+        if (next_configured_anchor_ids[anchorId]) {
             LOG_ERROR("Rejected static anchor config: duplicate anchor id %u",
                      static_cast<unsigned int>(anchorId));
-            invalid_config = true;
-            break;
+            return false;
         }
         if (!std::isfinite(anchor.x) || !std::isfinite(anchor.y) || !std::isfinite(anchor.z)) {
             LOG_ERROR("Rejected static anchor config: non-finite coordinates for anchor id %u",
                      static_cast<unsigned int>(anchorId));
-            invalid_config = true;
-            break;
+            return false;
         }
-        anchor_positions[anchorId] = anchor;
-        configured_anchor_ids[anchorId] = true;
+        next_anchor_positions[anchorId] = anchor;
+        next_configured_anchor_ids[anchorId] = true;
         max_anchor_id = std::max(max_anchor_id, anchorId);
         configured++;
     }
 
-    if (!invalid_config && configured > 0) {
-        const uint8_t required_count = static_cast<uint8_t>(max_anchor_id + 1);
-        bool contiguous = configured == required_count;
-        for (uint8_t id = 0; contiguous && id < required_count; id++) {
-            contiguous = configured_anchor_ids[id];
-        }
-        if (!contiguous) {
-            LOG_ERROR("Rejected non-contiguous static anchor ids (configured=%u max=%u)",
-                      static_cast<unsigned int>(configured),
-                      static_cast<unsigned int>(max_anchor_id));
-            anchor_positions.fill({});
-            configured_anchor_ids.fill(false);
-            configured = 0;
-        }
-    }
-    if (invalid_config) {
-        anchor_positions.fill({});
-        configured_anchor_ids.fill(false);
-        configured = 0;
+    if (configured == 0) {
+        LOG_ERROR("Rejected static anchor config: no anchors configured");
+        return false;
     }
 
+    const uint8_t required_count = static_cast<uint8_t>(max_anchor_id + 1);
+    bool contiguous = configured == required_count;
+    for (uint8_t id = 0; contiguous && id < required_count; id++) {
+        contiguous = next_configured_anchor_ids[id];
+    }
+    if (!contiguous) {
+        LOG_ERROR("Rejected non-contiguous static anchor ids (configured=%u max=%u)",
+                  static_cast<unsigned int>(configured),
+                  static_cast<unsigned int>(max_anchor_id));
+        return false;
+    }
+
+    anchor_positions = next_anchor_positions;
+    configured_anchor_ids = next_configured_anchor_ids;
     clearFreshMeasurementsLocked();
-    return configured;
+    configuredOut = configured;
+    return true;
 }
 
 // Last-notify timestamp for debouncing producer-side wakeups.
@@ -806,8 +802,13 @@ bool UWBTagTDoA::ApplyStaticAnchors(etl::span<const UWBAnchorParam> anchors)
         return false;
     }
 
-    const uint8_t configured = applyStaticAnchorsLocked(anchors);
+    uint8_t configured = 0;
+    const bool applied = applyStaticAnchorsLocked(anchors, configured);
     xSemaphoreGive(measurements_mtx);
+
+    if (!applied) {
+        return false;
+    }
 
     s_estimatorReinitRequested.store(true, std::memory_order_relaxed);
     LOG_INFO("Static anchor config applied to estimator (%u anchors)",
@@ -945,7 +946,8 @@ static void estimatorProcess() {
                                              min_measurements,
                                              snapshot,
                                              kNumPairs,
-                                             USE_2D_ESTIMATOR ? 0 : kMin3DUniqueAnchorsForSolve);
+                                             USE_2D_ESTIMATOR ? 0 : kMin3DUniqueAnchorsForSolve,
+                                             USE_2D_ESTIMATOR ? 0 : kMax3DBatchSpanUs);
 
         have_enough = snapshotResult.haveEnough;
         copy_count = snapshotResult.copied;
@@ -1219,6 +1221,11 @@ static void estimatorProcess() {
 
 bool UWBTagTDoA::IsDynamicPositioningEnabled() {
     return s_useDynamicPositions;
+}
+
+bool UWBTagTDoA::AreDynamicPositionsReadyForEstimator() {
+    return s_useDynamicPositions
+        && s_dynamicPositionsReadyForEstimator.load(std::memory_order_relaxed);
 }
 
 void UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(uint8_t enabled) {

@@ -118,7 +118,7 @@ void UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
     }
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
-    if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::IsDynamicPositioningEnabled()) {
+    if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
         if (applyEstimator) {
             LOG_INFO("Static anchor config saved; dynamic anchor positioning is active");
         }
@@ -203,7 +203,7 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
     if (strcmp(name, "dynamicAnchorPosEnabled") == 0 && m_Params.mode == UWBMode::TAG_TDOA) {
         UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
-        if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::IsDynamicPositioningEnabled()) {
+        if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
             ApplyStaticAnchorsToLiveBackends(false, true);
         } else {
             ApplyStaticAnchorsToLiveBackends(true, true);
@@ -221,7 +221,7 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
             ApplyStaticAnchorsToLiveBackends(true, true);
         } else if (isStaticAnchorGeometryParam(name)) {
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
-            if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::IsDynamicPositioningEnabled()) {
+            if (m_Params.dynamicAnchorPosEnabled != 0 && UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
                 LOG_INFO("Static anchor parameter saved; dynamic anchor positioning is active");
             } else
 #endif

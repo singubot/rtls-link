@@ -113,9 +113,8 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
         }
     }
     if (invalid_config) {
-        next_anchors.fill({});
-        max_anchor_id = 0;
-        configured = 0;
+        LOG_WARN("RTLSLink beacon keeping previous anchor config");
+        return;
     }
 
     if (config_mutex_ == nullptr || xSemaphoreTake(config_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {

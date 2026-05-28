@@ -32,12 +32,15 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
     size_t minMeasurements,
     MeasurementSlot* out,
     size_t outCapacity,
-    uint8_t minUniqueAnchors = 0)
+    uint8_t minUniqueAnchors = 0,
+    uint64_t maxBatchSpanUs = 0)
 {
     MeasurementSnapshotResult result;
     size_t usableFresh = 0;
     etl::array<bool, AnchorCount> usableAnchorSeen = {};
     uint8_t usableUniqueAnchors = 0;
+    uint64_t minTimestampUs = UINT64_MAX;
+    uint64_t maxTimestampUs = 0;
 
     for (auto& slot : slots) {
         if (!slot.fresh) {
@@ -53,6 +56,12 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
             continue;
         }
         ++usableFresh;
+        if (slot.timestamp_us < minTimestampUs) {
+            minTimestampUs = slot.timestamp_us;
+        }
+        if (slot.timestamp_us > maxTimestampUs) {
+            maxTimestampUs = slot.timestamp_us;
+        }
         if (!usableAnchorSeen[slot.anchor_a]) {
             usableAnchorSeen[slot.anchor_a] = true;
             ++usableUniqueAnchors;
@@ -66,6 +75,11 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
     result.haveEnough = usableFresh >= minMeasurements
                      && usableUniqueAnchors >= minUniqueAnchors;
     result.measurementCountForStats = usableFresh;
+    if (result.haveEnough
+        && maxBatchSpanUs > 0
+        && (maxTimestampUs - minTimestampUs) > maxBatchSpanUs) {
+        result.haveEnough = false;
+    }
     if (!result.haveEnough) {
         return result;
     }

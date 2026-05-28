@@ -171,6 +171,31 @@ TEST(TDoAMeasurementBuffer, SnapshotLeavesBatchWithoutEnoughUniqueAnchorsUnconsu
     }
 }
 
+TEST(TDoAMeasurementBuffer, SnapshotLeavesWideSpanBatchUnconsumed)
+{
+    etl::array<tdoa::MeasurementSlot, 5> slots = {};
+    etl::array<bool, 5> configured = {true, true, true, true, true};
+    tdoa::MeasurementSlot snapshot[5] = {};
+
+    slots[0] = tdoa::MeasurementSlot{1.0f, 100, 0, 1, true};
+    slots[1] = tdoa::MeasurementSlot{2.0f, 120, 1, 2, true};
+    slots[2] = tdoa::MeasurementSlot{3.0f, 140, 2, 3, true};
+    slots[3] = tdoa::MeasurementSlot{4.0f, 160, 3, 4, true};
+    slots[4] = tdoa::MeasurementSlot{5.0f, 250, 0, 4, true};
+
+    const tdoa::MeasurementSnapshotResult result =
+        tdoa::SnapshotFreshMeasurements(slots, configured, 260, 300, 5, snapshot, 5, 5, 120);
+
+    EXPECT_FALSE(result.haveEnough);
+    EXPECT_EQ(result.copied, 0);
+    EXPECT_EQ(result.measurementCountForStats, 5);
+    EXPECT_EQ(result.expired, 0);
+    EXPECT_EQ(result.consumed, 0);
+    for (const auto& slot : slots) {
+        EXPECT_TRUE(slot.fresh);
+    }
+}
+
 TEST(TDoAMeasurementBuffer, SnapshotExpiresInvalidAnchorSlotsBeforeIndexingConfiguredAnchors)
 {
     etl::array<tdoa::MeasurementSlot, 1> slots = {};

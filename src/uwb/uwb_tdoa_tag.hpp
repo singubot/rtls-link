@@ -72,6 +72,7 @@ public:
      */
     static uint8_t GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8_t maxCount);
     static void ApplyDynamicAnchorPositioningEnabled(uint8_t enabled);
+    static bool AreDynamicPositionsReadyForEstimator();
 #ifdef USE_RTLSLINK_BEACON_BACKEND
     static void ConfigureRtlslinkBeaconFromCurrentAnchors();
 #endif
