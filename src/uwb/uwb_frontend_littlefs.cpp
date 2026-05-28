@@ -2,6 +2,7 @@
 
 #include "uwb_frontend_littlefs.hpp"
 #include "logging/logging.hpp"
+#include <cmath>
 #include <cstring>
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
@@ -45,6 +46,31 @@ bool isRtlslinkRuntimeConfigParam(const char* name)
         || strcmp(name, "originLat") == 0
         || strcmp(name, "originLon") == 0
         || strcmp(name, "originAlt") == 0;
+}
+
+bool isFiniteRtlslinkRuntimeConfigValue(const char* name, const void* data)
+{
+    if (data == nullptr) {
+        return false;
+    }
+
+    if (strcmp(name, "rotationDegrees") == 0 || strcmp(name, "originAlt") == 0) {
+        float parsed = 0.0f;
+        return Utils::TransformStrToData(ParamType::FLOAT,
+                                         static_cast<const char*>(data),
+                                         &parsed) == Utils::ErrorTransform::OK
+            && std::isfinite(parsed);
+    }
+
+    if (strcmp(name, "originLat") == 0 || strcmp(name, "originLon") == 0) {
+        double parsed = 0.0;
+        return Utils::TransformStrToData(ParamType::DOUBLE,
+                                         static_cast<const char*>(data),
+                                         &parsed) == Utils::ErrorTransform::OK
+            && std::isfinite(parsed);
+    }
+
+    return true;
 }
 #endif
 
@@ -272,11 +298,51 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
             return ErrorParam::INVALID_DATA;
         }
     }
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    if (isRtlslinkRuntimeConfigParam(name) && !isFiniteRtlslinkRuntimeConfigValue(name, data)) {
+        LOG_ERROR("Rejected non-finite RTLSLink runtime UWB parameter '%s'", name);
+        return ErrorParam::INVALID_DATA;
+    }
+#endif
 
     ErrorParam result = LittleFSFrontend<UWBParams>::SetParam(name, data, len);
     if (result != ErrorParam::OK) {
         return result;
     }
+
+    auto applyTagRuntimeAnchorsTransaction = [this](bool applyEstimator, bool applyRtlslinkBeacon) {
+#ifdef USE_UWB_MODE_TDOA_TAG
+        if (applyEstimator && !UWBTagTDoA::ValidateStaticAnchors(GetAnchors())) {
+            return false;
+        }
+#else
+        (void)applyEstimator;
+#endif
+
+        if (applyRtlslinkBeacon && !ApplyStaticAnchorsToLiveBackends(false, true)) {
+            return false;
+        }
+
+        if (applyEstimator && !ApplyStaticAnchorsToLiveBackends(true, false)) {
+            return false;
+        }
+
+        return true;
+    };
+
+    auto rollbackParamsAndRuntime = [this, &applyTagRuntimeAnchorsTransaction](const UWBParams& rollbackParams,
+                                                                              bool restoreEstimator,
+                                                                              bool restoreRtlslinkBeacon) {
+        m_Params = rollbackParams;
+        const ErrorParam rollbackResult = SaveParams();
+        if (m_Params.mode == UWBMode::TAG_TDOA) {
+            (void)applyTagRuntimeAnchorsTransaction(restoreEstimator, restoreRtlslinkBeacon);
+        }
+        if (rollbackResult != ErrorParam::OK) {
+            return rollbackResult;
+        }
+        return ErrorParam::INVALID_DATA;
+    };
 
 #ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
     if (strcmp(name, "uwbEnable") == 0) {
@@ -317,7 +383,7 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
     if (strcmp(name, "dynamicAnchorPosEnabled") == 0 && m_Params.mode == UWBMode::TAG_TDOA) {
         bool transitionApplied = true;
         if (m_Params.dynamicAnchorPosEnabled == 0) {
-            transitionApplied = ApplyStaticAnchorsToLiveBackends(true, true);
+            transitionApplied = applyTagRuntimeAnchorsTransaction(true, true);
             if (transitionApplied) {
                 UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
                 rememberAcceptedStaticAnchorConfig(m_Params);
@@ -327,7 +393,7 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
             if (UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
                 transitionApplied = ApplyStaticAnchorsToLiveBackends(false, true);
             } else {
-                transitionApplied = ApplyStaticAnchorsToLiveBackends(true, true);
+                transitionApplied = applyTagRuntimeAnchorsTransaction(true, true);
                 if (transitionApplied) {
                     rememberAcceptedStaticAnchorConfig(m_Params);
                 }
@@ -335,12 +401,7 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
         }
         if (!transitionApplied) {
             LOG_ERROR("Rejected dynamic anchor positioning change; restoring previous UWB params");
-            m_Params = previousParams;
-            const ErrorParam rollbackResult = SaveParams();
-            if (rollbackResult != ErrorParam::OK) {
-                return rollbackResult;
-            }
-            return ErrorParam::INVALID_DATA;
+            return rollbackParamsAndRuntime(previousParams, false, true);
         }
     }
 #endif
@@ -348,19 +409,17 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
     if (m_Params.mode == UWBMode::TAG_TDOA) {
 #ifdef USE_RTLSLINK_BEACON_BACKEND
         if (isRtlslinkRuntimeConfigParam(name)) {
-            ApplyStaticAnchorsToLiveBackends(false, true);
+            if (!ApplyStaticAnchorsToLiveBackends(false, true)) {
+                LOG_ERROR("Rejected RTLSLink runtime config change; restoring previous UWB params");
+                return rollbackParamsAndRuntime(previousParams, false, true);
+            }
         }
 #endif
         if (staticAnchorCommit) {
-            if (!ApplyStaticAnchorsToLiveBackends(true, true)) {
+            if (!applyTagRuntimeAnchorsTransaction(true, true)) {
                 LOG_ERROR("Rejected invalid UWB static anchor config; restoring previous accepted anchors");
                 restoreAcceptedStaticAnchorConfig(m_Params, previousParams);
-                const ErrorParam rollbackResult = SaveParams();
-                ApplyStaticAnchorsToLiveBackends(true, true);
-                if (rollbackResult != ErrorParam::OK) {
-                    return rollbackResult;
-                }
-                return ErrorParam::INVALID_DATA;
+                return rollbackParamsAndRuntime(m_Params, true, true);
             }
             rememberAcceptedStaticAnchorConfig(m_Params);
         } else if (isStaticAnchorGeometryParam(name)) {

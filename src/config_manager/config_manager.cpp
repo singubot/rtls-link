@@ -1,6 +1,7 @@
 #include "config_manager.hpp"
 #include "front.hpp"
 #include "logging/logging.hpp"
+#include "uwb/uwb_params.hpp"
 
 #include <cerrno>
 #include <cctype>
@@ -99,11 +100,12 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
     }
 
     StoredAnchorConfig anchors[kMaxConfigAnchors] = {};
+    bool tagTdoaMode = false;
     bool anchorCountPresent = false;
     uint8_t anchorCount = 0;
     bool valid = true;
 
-    while (file.available() && valid) {
+    while (file.available()) {
         String line = file.readStringUntil('\n');
         line.trim();
         if (line.length() == 0 || line.startsWith("#")) {
@@ -131,11 +133,18 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
         }
 
         const String paramName = key.substring(dotIndex + 1);
+        if (paramName == "mode") {
+            uint8_t parsed = 0;
+            tagTdoaMode = parseU8Strict(value, parsed)
+                && parsed == static_cast<uint8_t>(UWBMode::TAG_TDOA);
+            continue;
+        }
+
         if (paramName == "anchorCount") {
             uint8_t parsed = 0;
             if (!parseU8Strict(value, parsed) || parsed > kMaxConfigAnchors) {
                 valid = false;
-                break;
+                continue;
             }
             anchorCountPresent = true;
             anchorCount = parsed;
@@ -147,7 +156,7 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
             uint8_t devId = 0;
             if (!parseU8Strict(value, devId) || devId >= kMaxConfigAnchors) {
                 valid = false;
-                break;
+                continue;
             }
             anchors[slot].devIdPresent = true;
             anchors[slot].devId = devId;
@@ -172,6 +181,10 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
     }
 
     file.close();
+
+    if (!tagTdoaMode) {
+        return ConfigError::OK;
+    }
 
     if (!valid || !anchorCountPresent || anchorCount == 0) {
         if (valid) {
