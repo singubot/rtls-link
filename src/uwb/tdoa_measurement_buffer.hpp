@@ -78,7 +78,34 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
     if (result.haveEnough
         && maxBatchSpanUs > 0
         && (maxTimestampUs - minTimestampUs) > maxBatchSpanUs) {
-        result.haveEnough = false;
+        const uint64_t oldestAllowedUs = maxTimestampUs - maxBatchSpanUs;
+        usableFresh = 0;
+        usableAnchorSeen.fill(false);
+        usableUniqueAnchors = 0;
+
+        for (auto& slot : slots) {
+            if (!slot.fresh) {
+                continue;
+            }
+            if (slot.timestamp_us < oldestAllowedUs) {
+                slot.fresh = false;
+                ++result.expired;
+                continue;
+            }
+            ++usableFresh;
+            if (!usableAnchorSeen[slot.anchor_a]) {
+                usableAnchorSeen[slot.anchor_a] = true;
+                ++usableUniqueAnchors;
+            }
+            if (!usableAnchorSeen[slot.anchor_b]) {
+                usableAnchorSeen[slot.anchor_b] = true;
+                ++usableUniqueAnchors;
+            }
+        }
+
+        result.haveEnough = usableFresh >= minMeasurements
+                         && usableUniqueAnchors >= minUniqueAnchors;
+        result.measurementCountForStats = usableFresh;
     }
     if (!result.haveEnough) {
         return result;

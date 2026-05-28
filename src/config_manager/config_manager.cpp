@@ -174,7 +174,10 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
     file.close();
 
     if (!valid || !anchorCountPresent || anchorCount == 0) {
-        return valid ? ConfigError::OK : ConfigError::INVALID_CONFIG;
+        if (valid) {
+            LOG_ERROR("ConfigManager: Config %s missing positive UWB anchorCount", path);
+        }
+        return ConfigError::INVALID_CONFIG;
     }
 
     bool seen[kMaxConfigAnchors] = {};

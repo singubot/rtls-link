@@ -96,6 +96,7 @@ static void estimatorProcess();
 // timestamp check at consume time.
 static constexpr uint8_t kNumAnchors = 8;
 static constexpr uint8_t kNumPairs = (kNumAnchors * (kNumAnchors - 1)) / 2;
+static constexpr uint8_t kDynamicAnchorCount = 4;
 
 using PairSlot = tdoa::MeasurementSlot;
 
@@ -126,7 +127,7 @@ static std::atomic<bool> s_estimatorReinitRequested{false};
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_RTLSLINK_BEACON_BACKEND)
 static void configureRtlslinkBeaconFromAnchorPositions()
 {
-    etl::array<UWBAnchorParam, 8> dynamic_anchors = {};
+    etl::array<UWBAnchorParam, kDynamicAnchorCount> dynamic_anchors = {};
     uint8_t dynamic_anchor_count = 0;
 
     if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -134,7 +135,7 @@ static void configureRtlslinkBeaconFromAnchorPositions()
         return;
     }
 
-    for (uint8_t id = 0; id < dynamic_anchors.size(); id++) {
+    for (uint8_t id = 0; id < kDynamicAnchorCount; id++) {
         if (!configured_anchor_ids[id]) {
             continue;
         }
@@ -1324,10 +1325,15 @@ void UWBTagTDoA::maybeUpdateDynamicPositions() {
         // CRITICAL: Lock mutex before updating shared anchor_positions
         // This prevents race conditions with estimatorProcess() which reads these values
         if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
-            for (int i = 0; i < 4; i++) {
+            for (uint8_t i = 0; i < kDynamicAnchorCount; i++) {
                 anchor_positions[i].x = newPositions[i].x;
                 anchor_positions[i].y = newPositions[i].y;
                 anchor_positions[i].z = newPositions[i].z;
+                configured_anchor_ids[i] = true;
+            }
+            for (uint8_t i = kDynamicAnchorCount; i < kNumAnchors; i++) {
+                configured_anchor_ids[i] = false;
+                anchor_positions[i] = {};
             }
 
             if (!s_dynamicPositionsReadyForEstimator.load(std::memory_order_relaxed)) {

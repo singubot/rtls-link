@@ -107,9 +107,7 @@ void RTLSLinkBeaconBackend::ConfigureAnchors(etl::span<const UWBAnchorParam> anc
             LOG_ERROR("RTLSLink beacon rejected non-contiguous anchor ids (configured=%u max=%u)",
                       static_cast<unsigned int>(configured),
                       static_cast<unsigned int>(max_anchor_id));
-            next_anchors.fill({});
-            max_anchor_id = 0;
-            configured = 0;
+            invalid_config = true;
         }
     }
     if (invalid_config) {
