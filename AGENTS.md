@@ -14,7 +14,16 @@ RTLS Link firmware work may need to be coordinated with the Axiovel ArduPilot fo
 - The ArduPilot fork has SITL support, which is useful for testing firmware/protocol changes before involving real hardware.
 - If a feature touches both RTLS Link and ArduPilot behavior, inspect both repositories when possible and consider SITL validation as part of the test plan.
 
-Machine-specific local paths for the ArduPilot checkout and remote access details should not be committed. The Axiovel ArduPilot fork currently uses self-hosted GitHub Actions runners on a remote server, and RTLS Link may use the same pattern in the future. Keep host-specific details in the local-only skill at `.agents/skills/local_context/SKILL.md`, which is ignored by git. That skill may point to sibling local-only context files, such as remote CI host notes; read those only when the task needs that context.
+Machine-specific local paths for the ArduPilot checkout and remote access details should not be committed. The Axiovel ArduPilot fork currently uses self-hosted GitHub Actions runners on a remote server, and RTLS Link may use the same pattern in the future.
+
+## Local Agent Context
+
+Local/private agent context should live outside tracked project files. For FeatureDev-created worktrees, use the shared local context directory at `<parent-dir>/.worktrees/<repo-name>/.agents`. For this repository that normally resolves to `<parent-dir>/.worktrees/rtls-link/.agents`.
+
+- Keep host-specific details, local skills, private path hints, hardware notes, and remote CI notes under that `.agents` directory.
+- Agents should inspect relevant files there only when the task needs local/private context.
+- Treat everything under `.worktrees/<repo-name>/.agents` as local-only: never stage, commit, push, quote broadly, or copy it into tracked files.
+- If a legacy checkout-local `.agents/skills/local_context/SKILL.md` exists, it may still be used as local-only context, but new shared context should prefer the `.worktrees/<repo-name>/.agents` location so it is available to all FeatureDev worktrees for the repo.
 
 ## Build System
 
@@ -105,6 +114,7 @@ ESP32 environments use:
 
 - When adding new features to the code base, make sure to wrap it into a macro preprocessor feature switch (see features.hpp and user_defines.txt ). If there are any dependencies that need to be made ( like maybe feature X needs of feature Y, make sure to update the feature_validation.hpp ).
 - When adding a new functionality from scratch. Always create a new branch called `feature/<title>` before starting to write the code.
+- When using the FeatureDev workflow, create the feature branch in a dedicated worktree under `<parent-dir>/.worktrees/<repo-name>/wt_<branch-name>`. For this repo, that means `<parent-dir>/.worktrees/rtls-link/wt_<branch-name>`. This keeps generated worktrees grouped and avoids cluttering the parent directory.
 - Always when adding a new feature to the firmware ( basically src folder ) you need to maintain in "sync" compatibility with the new feature of the desktop app that you can find inside `tools/rtls-link-manager`. The rtls-link-manager is a git submodule with it's own repository. You should create there the same corresponding branch. When opening the PRs, on the rtls-link repository, you should add a link with the matching feature PR of the `rtls-link-manager`.
 - The repo has a special features file called `user_defines.txt` where it introduces all the feature flags included on the build. When adding a new feature make sure to add it to the `user_defines.txt`. All features should be there, if disables it should simply be commented out.
 
