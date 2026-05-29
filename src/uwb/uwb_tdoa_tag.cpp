@@ -102,7 +102,7 @@ static constexpr uint8_t kDynamicAnchorCount3D = 8;
 using PairSlot = tdoa::MeasurementSlot;
 
 static constexpr size_t kMin3DMeasurementsForSolve = 5;
-static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 5;
+static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 4;
 static constexpr uint64_t kMax3DBatchSpanUs = 120000;
 static constexpr tdoa_estimator::Scalar kMax3DPositionVarianceM2 = 9.0f;
 
@@ -260,6 +260,12 @@ static bool configureRtlslinkBeaconFromAnchorPositions()
                  static_cast<unsigned int>(dynamic_anchor_count));
     }
     return configured;
+}
+
+static void clearRtlslinkBeaconDynamicAnchors()
+{
+    etl::array<UWBAnchorParam, 1> emptyAnchors = {};
+    App::ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam>(emptyAnchors.data(), 0));
 }
 #endif
 
@@ -1567,6 +1573,22 @@ void UWBTagTDoA::maybeUpdateDynamicPositions() {
         giveDynamicCalcMutex();
     }
     if (!calculated) {
+        if (s_dynamicPositionsReadyForEstimator.exchange(false, std::memory_order_relaxed)) {
+            if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+                for (uint8_t i = 0; i < kNumAnchors; i++) {
+                    configured_anchor_ids[i] = false;
+                    anchor_positions[i] = {};
+                }
+                clearFreshMeasurementsLocked();
+                xSemaphoreGive(measurements_mtx);
+            }
+            s_dynamicEstimatorReinitRequested.store(false, std::memory_order_relaxed);
+            s_dynamicTransitionHoldoffUntilMs.store(0, std::memory_order_relaxed);
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+            clearRtlslinkBeaconDynamicAnchors();
+#endif
+            LOG_WARN("Dynamic anchor positions no longer valid; estimator waiting for fresh geometry");
+        }
         return;
     }
 

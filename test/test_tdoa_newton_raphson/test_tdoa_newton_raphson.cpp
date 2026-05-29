@@ -120,6 +120,33 @@ TEST_F(TDOANewtonRaphsonTest, PerfectConditions3D) {
     EXPECT_TRUE(result.converged);
 }
 
+TEST_F(TDOANewtonRaphsonTest, FourNonCoplanarAnchors3D) {
+    tdoa_estimator::PosVector3D truePosition;
+    truePosition << 1.4f, 1.2f, 1.1f;
+
+    tdoa_estimator::PosMatrix anchors(4, 3);
+    anchors << 0.0f, 0.0f, 0.0f,
+               4.0f, 0.0f, 0.0f,
+               0.0f, 3.0f, 0.0f,
+               1.0f, 1.0f, 2.5f;
+
+    std::vector<std::pair<int, int>> measurementAnchorIds = {
+        {0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}
+    };
+
+    auto [anchorPositionsLeft, anchorPositionsRight, tdoas] =
+        calculateTrueTDOAs(anchors, measurementAnchorIds, truePosition);
+
+    auto result = tdoa_estimator::newtonRaphson(
+        anchorPositionsLeft, anchorPositionsRight, tdoas, calculateInitialGuess(anchors), 15);
+
+    Scalar error = (result.position - truePosition).norm();
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(result.converged);
+    EXPECT_FALSE(result.position.hasNaN());
+    EXPECT_LT(error, 0.05f);
+}
+
 TEST_F(TDOANewtonRaphsonTest, WithNoise3D) {
     std::cout << "\nTesting 3D estimation with noisy measurements..." << std::endl;
 

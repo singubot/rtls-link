@@ -26,8 +26,7 @@ constexpr float DW1000_TIME_TO_METERS = 0.004691763978616f;
 // Maximum number of anchors supported
 constexpr uint8_t MAX_DYNAMIC_ANCHORS = 8;
 
-// Staleness timeout for accumulated distances (in FreeRTOS ticks, configTICK_RATE_HZ = 1000)
-// User preference: 5 seconds timeout, warn only (don't reset data)
+// Staleness timeout for finalized distances (in FreeRTOS ticks, configTICK_RATE_HZ = 1000)
 constexpr uint32_t STALENESS_TIMEOUT_TICKS = 5000;
 
 /**
@@ -136,10 +135,20 @@ public:
     void updateDistance(uint8_t fromAnchor, uint8_t toAnchor, float distanceMeters);
 
     /**
+     * @brief Update with an explicit timestamp. Used by tests and by updateDistance().
+     */
+    void updateDistanceAt(uint8_t fromAnchor, uint8_t toAnchor, float distanceMeters, uint32_t timestamp);
+
+    /**
      * @brief Check if enough data is available to calculate positions
      * @return true if calculation can proceed
      */
     bool canCalculate() const;
+
+    /**
+     * @brief Check readiness with an explicit timestamp for finalized-distance freshness.
+     */
+    bool canCalculateAt(uint32_t currentTime) const;
 
     /**
      * @brief Calculate anchor positions from averaged distances
@@ -221,6 +230,9 @@ private:
     // Final averaged distance values (used for position calculation)
     float m_averagedDistances[MAX_DYNAMIC_ANCHORS][MAX_DYNAMIC_ANCHORS];
 
+    // Last update timestamp for each finalized averaged distance.
+    uint32_t m_averagedDistanceLastUpdate[MAX_DYNAMIC_ANCHORS][MAX_DYNAMIC_ANCHORS];
+
     // Locked positions (preserved when anchor is locked)
     point_t m_lockedPositions[MAX_DYNAMIC_ANCHORS];
 
@@ -246,6 +258,8 @@ private:
      * @return true if distances are geometrically valid
      */
     bool validateRectangular(float dX, float dY, float dDiag);
+
+    bool hasFreshDistance(uint8_t from, uint8_t to, uint32_t currentTime) const;
 
     /**
      * @brief Finalize averages when accumulator is ready
