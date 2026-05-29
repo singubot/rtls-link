@@ -45,7 +45,7 @@ bool parseU8Strict(String value, uint8_t& out)
     return true;
 }
 
-bool parseFiniteFloatStrict(String value)
+bool parseFiniteFloatStrict(String value, float* out = nullptr)
 {
     value.trim();
     if (value.length() == 0) {
@@ -63,6 +63,9 @@ bool parseFiniteFloatStrict(String value)
             return false;
         }
         end++;
+    }
+    if (out != nullptr) {
+        *out = parsed;
     }
     return true;
 }
@@ -128,6 +131,12 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
     bool anchorCountPresent = false;
     uint8_t anchorCount = 0;
     bool tagAnchorConfigValid = true;
+    bool dynamicAnchorConfigValid = true;
+    uint8_t dynamicAnchorPosEnabled = 0;
+    uint8_t use2DEstimator = 1;
+    uint8_t anchorLayout = 0;
+    float anchorHeight = 0.0f;
+    float anchorPlaneSeparation = 0.0f;
     bool rtlslinkRuntimeConfigValid = true;
 
     while (file.available()) {
@@ -173,6 +182,44 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
             }
             anchorCountPresent = true;
             anchorCount = parsed;
+            continue;
+        }
+
+        if (paramName == "dynamicAnchorPosEnabled") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > 1) {
+                dynamicAnchorConfigValid = false;
+                continue;
+            }
+            dynamicAnchorPosEnabled = parsed;
+            continue;
+        }
+        if (paramName == "use2DEstimator") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > 1) {
+                dynamicAnchorConfigValid = false;
+                continue;
+            }
+            use2DEstimator = parsed;
+            continue;
+        }
+        if (paramName == "anchorLayout") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > 3) {
+                dynamicAnchorConfigValid = false;
+                continue;
+            }
+            anchorLayout = parsed;
+            continue;
+        }
+        if (paramName == "anchorHeight") {
+            dynamicAnchorConfigValid = parseFiniteFloatStrict(value, &anchorHeight)
+                && dynamicAnchorConfigValid;
+            continue;
+        }
+        if (paramName == "anchorPlaneSeparation") {
+            dynamicAnchorConfigValid = parseFiniteFloatStrict(value, &anchorPlaneSeparation)
+                && dynamicAnchorConfigValid;
             continue;
         }
 
@@ -224,6 +271,19 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
     }
 
     if (!tagTdoaMode) {
+        return ConfigError::OK;
+    }
+
+    if (dynamicAnchorPosEnabled != 0) {
+        if (!dynamicAnchorConfigValid || anchorLayout > 3 || !std::isfinite(anchorHeight)) {
+            LOG_ERROR("ConfigManager: Config %s has invalid dynamic anchor parameters", path);
+            return ConfigError::INVALID_CONFIG;
+        }
+        if (use2DEstimator == 0
+            && (!std::isfinite(anchorPlaneSeparation) || anchorPlaneSeparation <= 0.0f)) {
+            LOG_ERROR("ConfigManager: Config %s has invalid dynamic 3D anchor plane separation", path);
+            return ConfigError::INVALID_CONFIG;
+        }
         return ConfigError::OK;
     }
 

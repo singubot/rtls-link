@@ -4,6 +4,7 @@
  */
 
 #include "dynamicAnchorPositions.hpp"
+#include <algorithm>
 #include <cstring>
 
 #ifdef ESP_PLATFORM
@@ -25,6 +26,12 @@ void DynamicAnchorPositionCalculator::init(const DynamicAnchorConfig& config) {
     }
     if (m_config.anchorHeight < 0) {
         m_config.anchorHeight = 0;
+    }
+    if (m_config.anchorPlaneSeparation < 0) {
+        m_config.anchorPlaneSeparation = 0;
+    }
+    if (m_config.anchorCount > MAX_DYNAMIC_ANCHORS) {
+        m_config.anchorCount = MAX_DYNAMIC_ANCHORS;
     }
 
     reset();
@@ -93,7 +100,7 @@ void DynamicAnchorPositionCalculator::updateDistance(uint8_t fromAnchor, uint8_t
 }
 
 bool DynamicAnchorPositionCalculator::canCalculate() const {
-    if (m_config.anchorCount < 4) {
+    if (m_config.anchorCount != 4 && m_config.anchorCount != 8) {
         return false;
     }
 
@@ -117,6 +124,18 @@ bool DynamicAnchorPositionCalculator::canCalculate() const {
 
     if (!hasDx || !hasDy) {
         return false;
+    }
+
+    if (m_config.anchorCount == 8) {
+        if (m_config.anchorPlaneSeparation <= 0.0f) {
+            return false;
+        }
+        for (uint8_t lower = 0; lower < 4; lower++) {
+            const uint8_t upper = lower + 4;
+            if ((m_validDistanceMask[lower] & (1 << upper)) == 0) {
+                return false;
+            }
+        }
     }
 
 #ifdef ESP_PLATFORM
@@ -203,6 +222,23 @@ bool DynamicAnchorPositionCalculator::calculateRectangular(point_t* positions, u
         return false;
     }
 
+    if (count >= 8) {
+        const float expectedSeparation = m_config.anchorPlaneSeparation;
+        if (expectedSeparation <= 0.0f) {
+            return false;
+        }
+
+        const float tolerance = std::max(0.5f, expectedSeparation * 0.35f);
+        for (uint8_t lower = 0; lower < 4; lower++) {
+            const uint8_t upper = lower + 4;
+            const float measuredSeparation = m_averagedDistances[lower][upper];
+            if (measuredSeparation <= 0.0f
+                || std::abs(measuredSeparation - expectedSeparation) > tolerance) {
+                return false;
+            }
+        }
+    }
+
     // Optional: validate with diagonal (A0 to corner anchor at (dX,dY))
     float dDiag = m_averagedDistances[0][cornerAnchor];
     if (dDiag > 0.0f) {
@@ -228,6 +264,15 @@ bool DynamicAnchorPositionCalculator::calculateRectangular(point_t* positions, u
             positions[i] = {0, 0.0f, dY, z};
         } else if (i == cornerAnchor) {
             positions[i] = {0, dX, dY, z};
+        }
+    }
+
+    if (count >= 8) {
+        const float upperZ = -(m_config.anchorHeight + m_config.anchorPlaneSeparation);
+        for (uint8_t lower = 0; lower < 4; lower++) {
+            const uint8_t upper = lower + 4;
+            positions[upper] = positions[lower];
+            positions[upper].z = upperZ;
         }
     }
 

@@ -122,6 +122,64 @@ bool parseUwbModeValue(const void* data, UWBMode& outMode)
     return true;
 }
 
+bool dynamicTagGeometryEnabled(const UWBParams& params)
+{
+    return params.mode == UWBMode::TAG_TDOA && params.dynamicAnchorPosEnabled != 0;
+}
+
+bool staticTagGeometryRequired(const UWBParams& params)
+{
+    return params.mode == UWBMode::TAG_TDOA && !dynamicTagGeometryEnabled(params);
+}
+
+bool isDynamicAnchorRuntimeParam(const char* name)
+{
+    return strcmp(name, "dynamicAnchorPosEnabled") == 0
+        || strcmp(name, "use2DEstimator") == 0
+        || strcmp(name, "anchorLayout") == 0
+        || strcmp(name, "anchorHeight") == 0
+        || strcmp(name, "anchorPlaneSeparation") == 0
+        || strcmp(name, "distanceAvgSamples") == 0
+        || strcmp(name, "anchorPosLocked") == 0;
+}
+
+bool validateDynamicTagGeometryForParams(const UWBParams& params)
+{
+    if (!dynamicTagGeometryEnabled(params)) {
+        return true;
+    }
+    if (params.anchorLayout > 3) {
+        LOG_ERROR("Rejected dynamic anchor config: unsupported anchorLayout %u",
+                  static_cast<unsigned int>(params.anchorLayout));
+        return false;
+    }
+    if (!std::isfinite(params.anchorHeight)) {
+        LOG_ERROR("Rejected dynamic anchor config: non-finite anchorHeight");
+        return false;
+    }
+    if (params.use2DEstimator == 0) {
+        if (!std::isfinite(params.anchorPlaneSeparation)
+            || params.anchorPlaneSeparation <= 0.0f) {
+            LOG_ERROR("Rejected dynamic 3D anchor config: positive anchorPlaneSeparation required");
+            return false;
+        }
+    }
+    return true;
+}
+
+#ifdef USE_UWB_MODE_TDOA_TAG
+bool validateStaticTagGeometryForParams(const UWBParams& params,
+                                        etl::span<const UWBAnchorParam> anchors)
+{
+    if (!staticTagGeometryRequired(params)) {
+        return true;
+    }
+    return UWBTagTDoA::ValidateStaticAnchorsForEstimator(
+        anchors,
+        params.use2DEstimator != 0);
+}
+#endif
+
 void copyStaticAnchorConfig(const UWBParams& from, UWBParams& to)
 {
     to.anchorCount = from.anchorCount;
@@ -246,7 +304,14 @@ ErrorParam UWBLittleFSFrontend::LoadParams() {
 #endif
 #ifdef USE_UWB_MODE_TDOA_TAG
         auto anchors = GetAnchors();
-        if (m_Params.mode == UWBMode::TAG_TDOA && !UWBTagTDoA::ValidateStaticAnchors(anchors)) {
+        if (m_Params.mode == UWBMode::TAG_TDOA
+            && !validateDynamicTagGeometryForParams(m_Params)) {
+            LOG_ERROR("Rejected stored UWB params with invalid dynamic TAG_TDOA geometry");
+            m_Params = previousParams;
+            return ErrorParam::INVALID_DATA;
+        }
+        if (m_Params.mode == UWBMode::TAG_TDOA
+            && !validateStaticTagGeometryForParams(m_Params, anchors)) {
             LOG_ERROR("Rejected stored UWB params with invalid TAG_TDOA anchor geometry");
             m_Params = previousParams;
             return ErrorParam::INVALID_DATA;
@@ -283,6 +348,14 @@ bool UWBLittleFSFrontend::ApplyLoadedRuntimeConfig()
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
     UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(m_Params.dynamicAnchorPosEnabled);
+    if (dynamicTagGeometryEnabled(m_Params)) {
+        UWBTagTDoA::ApplyDynamicAnchorRuntimeConfig(m_Params);
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+        ClearRtlslinkBeaconAnchors();
+#endif
+        LOG_INFO("Dynamic anchor positioning active; static TAG_TDOA geometry not applied");
+        return true;
+    }
 #endif
 
     if (!ApplyTagRuntimeAnchorsTransaction(true, true)) {
@@ -331,7 +404,7 @@ bool UWBLittleFSFrontend::ApplyTagRuntimeAnchorsTransaction(bool applyEstimator,
 {
 #ifdef USE_UWB_MODE_TDOA_TAG
     auto anchors = GetAnchors();
-    if (applyEstimator && !UWBTagTDoA::ValidateStaticAnchors(anchors)) {
+    if (applyEstimator && !validateStaticTagGeometryForParams(m_Params, anchors)) {
         return false;
     }
 #else
@@ -369,7 +442,7 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
     auto anchors = GetAnchors();
 
 #ifdef USE_UWB_MODE_TDOA_TAG
-    if (applyEstimator && !UWBTagTDoA::ValidateStaticAnchors(anchors)) {
+    if (applyEstimator && !validateStaticTagGeometryForParams(m_Params, anchors)) {
         return false;
     }
 #endif
@@ -377,7 +450,21 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
     const bool dynamicParamEnabled = (m_Params.dynamicAnchorPosEnabled != 0);
     const bool dynamicRunning = UWBTagTDoA::IsDynamicPositioningEnabled();
-    if (dynamicParamEnabled && dynamicRunning) {
+    if (dynamicParamEnabled) {
+        if (!dynamicRunning) {
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+            if (applyRtlslinkBeacon) {
+                ClearRtlslinkBeaconAnchors();
+            }
+#else
+            (void)applyRtlslinkBeacon;
+#endif
+            if (applyEstimator) {
+                LOG_INFO("Dynamic anchor positioning saved; reboot required to start dynamic calculations");
+            }
+            return true;
+        }
+
         if (UWBTagTDoA::AreDynamicPositionsReadyForEstimator()) {
             if (applyEstimator) {
                 LOG_INFO("Static anchor config saved; dynamic anchor positioning is active");
@@ -397,15 +484,15 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
         if (applyRtlslinkBeacon) {
             LOG_INFO("RTLSLink beacon waiting for dynamic anchor positions");
-            applyRtlslinkBeacon = false;
+            ClearRtlslinkBeaconAnchors();
         }
+#else
+        (void)applyRtlslinkBeacon;
 #endif
         if (applyEstimator) {
-            LOG_INFO("Static anchor config saved; dynamic anchor positioning is pending");
+            LOG_INFO("Dynamic anchor positioning pending; static TAG_TDOA geometry not applied");
         }
-    }
-    if (dynamicParamEnabled && !dynamicRunning && applyEstimator) {
-        LOG_INFO("Dynamic anchor positioning requires reboot; applying static anchors live until reboot");
+        return true;
     }
 #endif
 
@@ -512,6 +599,12 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
         return ErrorParam::INVALID_DATA;
     };
 
+    if (m_Params.mode == UWBMode::TAG_TDOA
+        && !validateDynamicTagGeometryForParams(m_Params)) {
+        LOG_ERROR("Rejected invalid dynamic TAG_TDOA geometry; restoring previous UWB params");
+        return rollbackParamsAndRuntime(previousParams, false, true, true);
+    }
+
 #ifdef USE_RUNTIME_SUBSYSTEM_TOGGLES
     if (strcmp(name, "uwbEnable") == 0) {
         if (m_Params.uwbEnable == 0) {
@@ -577,6 +670,17 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
     }
 #endif
 
+#if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
+    if (m_Params.mode == UWBMode::TAG_TDOA
+        && dynamicTagGeometryEnabled(m_Params)
+        && isDynamicAnchorRuntimeParam(name)) {
+        UWBTagTDoA::ApplyDynamicAnchorRuntimeConfig(m_Params);
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+        ClearRtlslinkBeaconAnchors();
+#endif
+    }
+#endif
+
     if (m_Params.mode == UWBMode::TAG_TDOA) {
 #ifdef USE_RTLSLINK_BEACON_BACKEND
         if (isRtlslinkRuntimeConfigParam(name)) {
@@ -591,6 +695,12 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
                 LOG_ERROR("Rejected invalid UWB static anchor config; restoring previous accepted anchors");
                 restoreAcceptedStaticAnchorConfig(m_Params, previousParams);
                 return rollbackParamsAndRuntime(m_Params, true, true);
+            }
+            rememberAcceptedStaticAnchorConfig(m_Params);
+        } else if (!dynamicTagGeometryEnabled(m_Params) && strcmp(name, "use2DEstimator") == 0) {
+            if (!ApplyTagRuntimeAnchorsTransaction(true, true)) {
+                LOG_ERROR("Rejected estimator mode change; static anchor geometry is incompatible");
+                return rollbackParamsAndRuntime(previousParams, true, true);
             }
             rememberAcceptedStaticAnchorConfig(m_Params);
         } else if (isStaticAnchorGeometryParam(name)) {

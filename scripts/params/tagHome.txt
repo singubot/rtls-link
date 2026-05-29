@@ -1,7 +1,6 @@
 wifi.mode: 0
 wifi.enableWebServer: 1
 wifi.enableUartBridge: 0
-wifi.enableDebugSocket: 0
 uwb.mode: 4
 uwb.devShortAddr: 49
 uwb.anchorCount: 4

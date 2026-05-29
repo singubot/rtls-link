@@ -2,21 +2,16 @@
 
 #include "wifi_frontend_littlefs.hpp"
 
-// Conditional includes based on feature flags
-#ifdef USE_WIFI_WEBSERVER
-#include "wifi_websocket.hpp"
+#ifdef USE_OTA_WEB
+#include "wifi_ota_server.hpp"
 #endif
 
 #ifdef USE_WIFI_UART_BRIDGE
 #include "wifi_uart_bridge.hpp"
 #endif
 
-#ifdef USE_WIFI_TCP_LOGGING
-#include "wifi_tcp_server.hpp"
-#endif
-
-#ifdef USE_WIFI_DISCOVERY
-#include "wifi_discovery.hpp"
+#ifdef USE_WIFI_MAVLINK_MANAGEMENT
+#include "wifi_mavlink_management.hpp"
 #endif
 
 #include "logging/logging.hpp"
@@ -58,7 +53,7 @@ private:
 } // namespace
 
 // Free function for telemetry callback (ETL delegates require free function or static method)
-#ifdef USE_WIFI_DISCOVERY
+#ifdef USE_WIFI_MAVLINK_MANAGEMENT
 static DeviceTelemetry GetDeviceTelemetry() {
     DeviceTelemetry t;
     const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
@@ -113,10 +108,10 @@ static DeviceTelemetry GetDeviceTelemetry() {
     // Dynamic anchor positions (for TDoA tag mode with dynamic positioning enabled)
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_UWB_MODE_TDOA_TAG)
     if (uwbParams.mode == UWBMode::TAG_TDOA) {
-        t.dynamic_anchors_enabled = UWBTagTDoA::IsDynamicPositioningEnabled();
+        t.dynamic_anchors_enabled = UWBTagTDoA::AreDynamicAnchorPositionsReady();
         if (t.dynamic_anchors_enabled) {
             t.dynamic_anchor_count = UWBTagTDoA::GetDynamicAnchorPositions(
-                t.dynamic_anchors, 4);
+                t.dynamic_anchors, 8);
         } else {
             t.dynamic_anchor_count = 0;
         }
@@ -128,7 +123,7 @@ static DeviceTelemetry GetDeviceTelemetry() {
 
     return t;
 }
-#endif // USE_WIFI_DISCOVERY
+#endif // USE_WIFI_MAVLINK_MANAGEMENT
 
 // I will define a static FreeRTOS task holder for station connection checks
 static StaticTaskHolder<etl::delegate<void()>, 4096> wifi_connection_task = {
@@ -154,12 +149,6 @@ void WifiLittleFSFrontend::Init() {
 
     UpdateMode(m_Params.mode);
 
-#ifdef USE_WIFI_TCP_LOGGING
-    m_TcpLoggingServer = new WifiTcpServer(m_Params.dbgPort);
-#else
-    m_TcpLoggingServer = nullptr;
-#endif
-
     // Apply logging settings from stored params
     ApplyLoggingSettings();
 
@@ -171,6 +160,9 @@ void WifiLittleFSFrontend::Init() {
 }
 
 void WifiLittleFSFrontend::Update() {
+    bool applyModeUpdate = false;
+    WifiMode pendingMode = WifiMode::UNDEFINED;
+    bool applyNetworkServicesSetup = false;
     {
         BackendsLockGuard lock(m_backendsMutex);
         if (!lock.IsLocked()) {
@@ -178,13 +170,24 @@ void WifiLittleFSFrontend::Update() {
             return;
         }
 
+        m_updatingBackends = true;
         for (WifiBackend* backend : m_Backends) {
             backend->Update();
         }
+        m_updatingBackends = false;
+
+        applyModeUpdate = m_pendingModeUpdate;
+        pendingMode = m_pendingMode;
+        applyNetworkServicesSetup = m_pendingNetworkServicesSetup;
+        m_pendingModeUpdate = false;
+        m_pendingMode = WifiMode::UNDEFINED;
+        m_pendingNetworkServicesSetup = false;
     }
-    
-    if (m_TcpLoggingServer) {
-        m_TcpLoggingServer->Update();
+
+    if (applyModeUpdate) {
+        UpdateMode(pendingMode);
+    } else if (applyNetworkServicesSetup && NetworkServicesActive()) {
+        SetupNetworkServices();
     }
 }
 
@@ -196,7 +199,7 @@ bool WifiLittleFSFrontend::SetupAP() {
 
     if (success) {
         LOG_INFO("AP IP: %s", WiFi.softAPIP().toString().c_str());
-        SetupWebServer();
+        SetupNetworkServices();
         return true;
     } else {
         LOG_WARN("AP setup failed");
@@ -213,24 +216,34 @@ void WifiLittleFSFrontend::SetupStation() {
     WiFi.begin(m_Params.ssidST.data(), m_Params.pswdST.data());
 }
 
-void WifiLittleFSFrontend::SetupWebServer() {
+void WifiLittleFSFrontend::SetupNetworkServices() {
     BackendsLockGuard lock(m_backendsMutex);
     if (!lock.IsLocked()) {
-        LOG_WARN("WiFi backend lock failed in SetupWebServer()");
+        LOG_WARN("WiFi backend lock failed in SetupNetworkServices()");
         return;
     }
 
     ClearBackendsUnlocked();
 
     if (m_Params.enableWebServer) {
-#ifdef USE_WIFI_WEBSERVER
-        LOG_INFO("WebSocket server enabled");
-        WifiWebSocket* webSocketServer = new WifiWebSocket("/ws", 80);
-        m_Backends.push_back(webSocketServer);
+#ifdef USE_OTA_WEB
+        LOG_INFO("HTTP OTA server enabled");
+        WifiOtaServer* otaServer = new WifiOtaServer(80);
+        m_Backends.push_back(otaServer);
 #else
-        LOG_WARN("WebServer requested but USE_WIFI_WEBSERVER not compiled");
+        LOG_WARN("HTTP OTA server requested but USE_OTA_WEB not compiled");
 #endif
     }
+
+#ifdef USE_WIFI_MAVLINK_MANAGEMENT
+    WifiMavlinkManagement* management = new WifiMavlinkManagement(m_Params);
+    management->SetTelemetryCallback(TelemetryCallback::create<&GetDeviceTelemetry>());
+    m_Backends.push_back(management);
+    LOG_INFO("MAVLink management enabled on UDP port %u",
+             static_cast<unsigned int>(WifiMavlinkManagement::kManagementPort));
+#else
+    LOG_WARN("MAVLink management requested but USE_WIFI_MAVLINK_MANAGEMENT not compiled");
+#endif
 
     if (m_Params.enableUartBridge) {
 #ifdef USE_WIFI_UART_BRIDGE
@@ -248,19 +261,6 @@ void WifiLittleFSFrontend::SetupWebServer() {
 #endif
     }
 
-    if (m_Params.enableDiscovery) {
-#ifdef USE_WIFI_DISCOVERY
-        WifiDiscovery* discoveryBackend = new WifiDiscovery(m_Params.discoveryPort, m_Params);
-        // Set telemetry callback for heartbeat enrichment
-        discoveryBackend->SetTelemetryCallback(
-            TelemetryCallback::create<&GetDeviceTelemetry>()
-        );
-        m_Backends.push_back(discoveryBackend);
-        LOG_INFO("Discovery service enabled on port %d", m_Params.discoveryPort);
-#else
-        LOG_WARN("Discovery requested but USE_WIFI_DISCOVERY not compiled");
-#endif
-    }
 }
 
 void WifiLittleFSFrontend::UpdateMode(WifiMode mode) {
@@ -287,7 +287,7 @@ void WifiLittleFSFrontend::StationConnectionThread() {
     if (m_currentMode == WifiMode::STATION) {
         if (WiFi.status() == WL_CONNECTED && !m_stationConnected) {
             LOG_INFO("WiFi connected - IP: %s", WiFi.localIP().toString().c_str());
-            SetupWebServer();
+            SetupNetworkServices();
             m_stationConnected = true;
 
             // Re-apply logging settings now that WiFi is connected
@@ -333,6 +333,34 @@ void WifiLittleFSFrontend::ApplyLoggingSettings() {
 #endif
 }
 
+bool WifiLittleFSFrontend::NetworkServicesActive() const {
+    return m_currentMode == WifiMode::AP ||
+           (m_currentMode == WifiMode::STATION && m_stationConnected);
+}
+
+void WifiLittleFSFrontend::RequestModeUpdate(WifiMode mode) {
+    if (m_updatingBackends) {
+        m_pendingModeUpdate = true;
+        m_pendingMode = mode;
+        return;
+    }
+
+    UpdateMode(mode);
+}
+
+void WifiLittleFSFrontend::RequestNetworkServicesSetup() {
+    if (!NetworkServicesActive()) {
+        return;
+    }
+
+    if (m_updatingBackends) {
+        m_pendingNetworkServicesSetup = true;
+        return;
+    }
+
+    SetupNetworkServices();
+}
+
 ErrorParam WifiLittleFSFrontend::SetParam(const char* name, const void* data, uint32_t len) {
     // Call base class implementation first
     ErrorParam result = LittleFSFrontend<WifiParams>::SetParam(name, data, len);
@@ -343,24 +371,19 @@ ErrorParam WifiLittleFSFrontend::SetParam(const char* name, const void* data, ui
 
     // Apply mode changes immediately when requested.
     if (strcmp(name, "mode") == 0) {
-        UpdateMode(m_Params.mode);
+        RequestModeUpdate(m_Params.mode);
     }
 
-    // Reconfigure runtime WiFi services immediately when bridge/server/discovery
-    // parameters are updated and networking is currently active.
-    // gcsIp is intentionally excluded: WifiDiscovery reads it live every heartbeat,
-    // and tearing down AsyncWebServer + rebinding port 80 occasionally fails to
-    // re-bind, leaving HTTP/WS dead until reboot. UART bridge keeps its old gcsIp
+    // Reconfigure runtime WiFi services when bridge/server parameters are updated
+    // and networking is currently active.
+    // gcsIp is intentionally excluded: MAVLink management reads it live every
+    // heartbeat, and tearing down AsyncWebServer + rebinding port 80 occasionally
+    // fails to re-bind, leaving HTTP OTA dead until reboot. UART bridge keeps its old gcsIp
     // until explicit toggle or reboot, which is the safer trade-off.
     if (strcmp(name, "enableWebServer") == 0 ||
         strcmp(name, "enableUartBridge") == 0 ||
-        strcmp(name, "enableDiscovery") == 0 ||
-        strcmp(name, "udpPort") == 0 ||
-        strcmp(name, "discoveryPort") == 0) {
-        if (m_currentMode == WifiMode::AP ||
-            (m_currentMode == WifiMode::STATION && m_stationConnected)) {
-            SetupWebServer();
-        }
+        strcmp(name, "udpPort") == 0) {
+        RequestNetworkServicesSetup();
     }
 
     // Check if this was a logging-related parameter and apply changes.

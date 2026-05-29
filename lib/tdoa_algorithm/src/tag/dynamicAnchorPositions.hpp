@@ -4,7 +4,8 @@
  *
  * This module calculates anchor positions dynamically from the inter-anchor
  * distance measurements broadcast in TDoA packets. It supports rectangular
- * 4-anchor layouts and provides averaging/filtering of distance measurements.
+ * 4-anchor single-plane layouts and 8-anchor two-plane layouts, and provides
+ * averaging/filtering of distance measurements.
  *
  * The calculator uses the distances array from TDoA anchor packets, which
  * contains the measured time-of-flight distances between anchors.
@@ -34,8 +35,9 @@ constexpr uint32_t STALENESS_TIMEOUT_TICKS = 5000;
  */
 struct DynamicAnchorConfig {
     uint8_t layout;              // AnchorLayout enum value
-    uint8_t anchorCount;         // Number of anchors in the system (typically 4)
-    float anchorHeight;          // Height for Z calculation (NED: Z = -anchorHeight)
+    uint8_t anchorCount;         // Number of anchors in the layout (4 for 2D, 8 for 3D)
+    float anchorHeight;          // Lower-plane height (NED: Z = -anchorHeight)
+    float anchorPlaneSeparation; // Vertical distance from lower plane to upper plane
     uint16_t avgSampleCount;     // Samples to average before calculating (default: 50)
     uint8_t lockedMask;          // Bitmask of locked anchor positions
 };
@@ -88,8 +90,9 @@ struct DistanceAccumulator {
  *
  * This class receives inter-anchor distance measurements extracted from TDoA
  * packets and calculates the 2D/3D positions of anchors based on the configured
- * layout. It supports position locking for individual anchors and provides
- * averaging to smooth out measurement noise.
+ * layout. The 8-anchor layout places A4 above A0, A5 above A1, A6 above A2,
+ * and A7 above A3. It supports position locking for individual anchors and
+ * provides averaging to smooth out measurement noise.
  *
  * Example usage:
  * @code
@@ -97,7 +100,8 @@ struct DistanceAccumulator {
  * DynamicAnchorConfig config = {
  *     .layout = 0,  // RECTANGULAR_A1X_A3Y (A0 at origin, +X=A1, +Y=A3)
  *     .anchorCount = 4,
- *     .anchorHeight = 2.0f,  // 2 meters high
+ *     .anchorHeight = 2.0f,  // lower plane 2 meters high
+ *     .anchorPlaneSeparation = 0.0f,
  *     .avgSampleCount = 50,
  *     .lockedMask = 0
  * };

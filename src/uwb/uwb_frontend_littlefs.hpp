@@ -121,6 +121,7 @@ public:
         PARAM_DEF(UWBParams, dynamicAnchorPosEnabled),
         PARAM_DEF(UWBParams, anchorLayout),
         PARAM_DEF(UWBParams, anchorHeight),
+        PARAM_DEF(UWBParams, anchorPlaneSeparation),
         PARAM_DEF(UWBParams, anchorPosLocked),
         PARAM_DEF(UWBParams, distanceAvgSamples),
         PARAM_DEF(UWBParams, tdoaAnchorModelMode),

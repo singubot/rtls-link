@@ -4,11 +4,9 @@ wifi.pswdAP: 12345678
 wifi.ssidST: TP-Link_6AF2
 wifi.pswdST: 15914392
 wifi.gcsIp: 192.168.0.105
-wifi.dbgPort: 8080
 wifi.udpPort: 14550
 wifi.enableWebServer: 1
 wifi.enableUartBridge: 1
-wifi.enableDebugSocket: 0
 uwb.mode: 4
 uwb.uwbEnable: 1
 uwb.devShortAddr: 1
@@ -46,5 +44,6 @@ uwb.rotationDegrees: 312.00000
 uwb.dynamicAnchorPosEnabled: 0
 uwb.anchorLayout: 0
 uwb.anchorHeight: 0.000000
+uwb.anchorPlaneSeparation: 0.000000
 uwb.anchorPosLocked: 0
 uwb.distanceAvgSamples: 50

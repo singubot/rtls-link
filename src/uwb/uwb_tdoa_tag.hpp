@@ -21,7 +21,7 @@ extern "C" {
 
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
 #include "tag/dynamicAnchorPositions.hpp"
-// Forward declaration for telemetry struct (defined in wifi_discovery.hpp)
+// Forward declaration for telemetry struct (defined in wifi_device_telemetry.hpp)
 struct DynamicAnchorTelemetry;
 #endif
 
@@ -52,6 +52,7 @@ public:
     static String GetEstimatorStatsJson();
     static void ResetEstimatorStats();
     static bool ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors);
+    static bool ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorParam> anchors, bool use2DEstimator);
     static bool ApplyStaticAnchors(etl::span<const UWBAnchorParam> anchors);
 #ifdef ESP32S3_UWB_BOARD
     static void ApplyMatcherPolicy(uint8_t policy);
@@ -63,6 +64,7 @@ public:
      * @return true if enabled
      */
     static bool IsDynamicPositioningEnabled();
+    static bool AreDynamicAnchorPositionsReady();
 
     /**
      * @brief Get the calculated dynamic anchor positions.
@@ -73,6 +75,7 @@ public:
      */
     static uint8_t GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8_t maxCount);
     static void ApplyDynamicAnchorPositioningEnabled(uint8_t enabled);
+    static void ApplyDynamicAnchorRuntimeConfig(const UWBParams& params);
     static bool AreDynamicPositionsReadyForEstimator();
 #ifdef USE_RTLSLINK_BEACON_BACKEND
     static bool ConfigureRtlslinkBeaconFromCurrentAnchors();

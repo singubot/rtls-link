@@ -18,10 +18,8 @@
 ; Required for web configuration and network features
 ; -----------------------------------------------------------------------------
 -D USE_WIFI
--D USE_WIFI_WEBSERVER           ; Web configuration UI
--D USE_WIFI_TCP_LOGGING         ; TCP debug logging server
 -D USE_WIFI_UART_BRIDGE         ; UART-to-UDP bridge
--D USE_WIFI_DISCOVERY           ; UDP discovery service
+-D USE_WIFI_MAVLINK_MANAGEMENT  ; MAVLink UDP management/discovery service
 ; -D USE_WIFI_MDNS              ; mDNS service discovery (NOT IMPLEMENTED)
 
 ; -----------------------------------------------------------------------------

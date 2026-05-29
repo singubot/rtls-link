@@ -30,6 +30,7 @@ Do not rush to implementation. Phase 1 must complete first, with explicit user c
 7. Ask for explicit go-ahead.
 8. Do not start Phase 2 until the user confirms explicitly.
 NOTE: During the discussion phase, the user might ask you ( you can suggest him also ) to write down your investigations, analisys, reports, questions and clarifications to a markdown file inside `.agents/docs/<tile>.md`. This is interesting in order to keep records and important findings encountered during this discussion/planification phase. Feel free also to suggest to the user to write relevant documentation down if you see a clear benefit to doing so.
+IMPORTANT: If an Implementation Agreement is written down, keep it as a local working note only. Do not commit it, push it, link it, or list it as PR content unless the user explicitly asks for a permanent documentation artifact.
 IMPORTANT: Files created under `.agents/docs/` are local working notes only. Leave them untracked and never commit or push them upstream. If one is accidentally staged, remove it from the commit before proceeding.
 IMPORTANT: Do not place temporary investigation/report notes under tracked documentation paths (for example `docs/investigations/`) unless the user explicitly asks for a permanent documentation artifact to be committed.
 IMPORTANT: If temporary investigation files are found in tracked paths, keep them completely unstaged before committing and pushing.
@@ -37,7 +38,7 @@ IMPORTANT: If temporary investigation files are found in tracked paths, keep the
 ## Phase 2: Execution Workflow (After Approval)
 1. Derive a branch slug from the title: lowercase kebab-case, only `[a-z0-9-]`, collapse repeated dashes.
 2. Branch name format is mandatory: `feature/<slug>`.
-3. Identify the git repository root.
+3. Identify the git repository root, repository name, and parent directory of the root.
 4. Fetch latest refs and prune stale ones: `git fetch --all --prune`.
 5. Select the base branch in this order, using remote first:
    - `develop`
@@ -46,11 +47,18 @@ IMPORTANT: If temporary investigation files are found in tracked paths, keep the
 6. If none of those branches exist locally or on `origin`, stop and report the issue.
 7. Ensure the selected base is up to date by starting from `origin/<base-branch>`.
 8. Create a new worktree and feature branch from that up-to-date base:
-   - Default worktree path: `../wt-<repo-name>-<slug>`
-   - If that path already exists, append a timestamp suffix.
+   - Worktrees created by this skill must live under the parent directory of the repository root, in a hidden `.worktrees` directory.
+   - Mandatory worktree path: `<parent-dir>/.worktrees/<repo-name>/wt_<branch-slug>`.
+   - Use the branch slug without the `feature/` prefix for `wt_<branch-slug>`.
+   - Create parent directories as needed before adding the worktree.
+   - If that path already exists, append a timestamp suffix to the final path segment, for example `wt_<branch-slug>_YYYYMMDDHHMMSS`.
    - Example command shape: `git worktree add -b "feature/<slug>" "<worktree-path>" "origin/<base-branch>"`
-9. Perform all implementation work only inside the new worktree.
-10. Implement the feature according to the agreed plan from Phase 1.
+9. Check for local-only agent context at `<parent-dir>/.worktrees/<repo-name>/.agents`:
+   - If it exists, inspect relevant instructions before implementing, especially local skills, private notes, path hints, hardware/remote environment notes, or repository-specific workflows.
+   - Treat everything under this `.agents` directory as private local context. Do not commit, stage, push, quote broadly, or copy it into tracked project files.
+   - Use it only when relevant to the task; do not deep-read unrelated private notes.
+10. Perform all implementation work only inside the new worktree.
+11. Implement the feature according to the agreed plan from Phase 1.
 
 ## Validation
 1. Attempt to compile/build if the project supports it.
@@ -69,7 +77,7 @@ Once the review is complete, the findings should be fixed and the validation rer
 If phase 2 has gone according to plan, the tests are passing, manual verification is healthy (if applicable) and there are no critical or high severity issues left, continue to phase 3 without asking the user.
 
 ## Commit, Push, and Draft PR
-1. Stage only relevant files. Never stage local-only investigation/report notes (for example `.agents/docs/*` and temporary files under `docs/investigations/*`).
+1. Stage only relevant files. Never stage local-only investigation/report notes (for example `.agents/docs/*`, `<parent-dir>/.worktrees/<repo-name>/.agents/*`, and temporary files under `docs/investigations/*`).
 2. Create a clear commit message describing the feature.
 3. Push with upstream: `git push -u origin "feature/<slug>"`.
 4. Select PR base branch in this order (remote): `develop`, fallback `main`, fallback `master`.
@@ -82,7 +90,7 @@ If phase 2 has gone according to plan, the tests are passing, manual verificatio
    - Feature description
    - Validation summary (build/unit/integration results, plus skipped checks and reasons)
    - Reviewer context (key decisions, refactor rationale if any, risks, migration/deployment notes, follow-ups)
-8. End the PR body with a footer in this format:
+8. End the PR body with this generic footer template. Do not try to look up a runtime model id, and do not write fallback text such as `model id not available`:
    - `Generated by <model name>`
 
 ## Final Output to User

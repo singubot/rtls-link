@@ -135,7 +135,8 @@ struct UWBParams {
     // Dynamic anchor positioning (TDoA tags)
     uint8_t dynamicAnchorPosEnabled = 0;  // 0=static (use configured positions), 1=dynamic (calculate from inter-anchor distances)
     uint8_t anchorLayout = 0;             // AnchorLayout enum value (0=RECTANGULAR_0_ORIGIN)
-    float anchorHeight = 0.0f;            // Height for Z calculation (NED: Z = -height)
+    float anchorHeight = 0.0f;            // Lower-plane height (NED: Z = -height)
+    float anchorPlaneSeparation = 0.0f;   // Vertical distance between lower and upper dynamic anchor planes
     uint8_t anchorPosLocked = 0;          // Bitmask: bit N = anchor N position locked
     uint16_t distanceAvgSamples = 50;     // Number of samples to average before calculating (default: 50)
 
