@@ -40,10 +40,8 @@
 
 // --- WiFi Subsystem ---
 #define USE_WIFI
-#define USE_WIFI_WEBSERVER
-#define USE_WIFI_TCP_LOGGING
 #define USE_WIFI_UART_BRIDGE
-#define USE_WIFI_DISCOVERY
+#define USE_WIFI_MAVLINK_MANAGEMENT
 #define USE_WIFI_MDNS
 
 // --- MAVLink Output ---

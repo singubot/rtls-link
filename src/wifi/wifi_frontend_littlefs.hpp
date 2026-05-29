@@ -31,19 +31,25 @@ public:
 private:
     bool SetupAP();
     void SetupStation();
-    void SetupWebServer();
+    void SetupNetworkServices();
     void UpdateMode(WifiMode mode);
     void ClearBackends();
     void ClearBackendsUnlocked();
     void ApplyLoggingSettings();
+    bool NetworkServicesActive() const;
+    void RequestModeUpdate(WifiMode mode);
+    void RequestNetworkServicesSetup();
 
     static constexpr uint32_t maxClients = 10;
 
     etl::vector<WifiBackend*, maxClients> m_Backends;
     SemaphoreHandle_t m_backendsMutex = nullptr;
-    class WifiTcpServer* m_TcpLoggingServer;
     WifiMode m_currentMode = WifiMode::UNDEFINED;
     bool m_stationConnected = false;
+    bool m_updatingBackends = false;
+    bool m_pendingNetworkServicesSetup = false;
+    bool m_pendingModeUpdate = false;
+    WifiMode m_pendingMode = WifiMode::UNDEFINED;
 
 public:
     static constexpr ParamDef s_ParamDefs[] = {
@@ -53,13 +59,9 @@ public:
         PARAM_DEF(WifiParams, ssidST),
         PARAM_DEF(WifiParams, pswdST),
         PARAM_DEF(WifiParams, gcsIp),
-        PARAM_DEF(WifiParams, dbgPort),
         PARAM_DEF(WifiParams, udpPort),
         PARAM_DEF(WifiParams, enableWebServer),
         PARAM_DEF(WifiParams, enableUartBridge),
-        PARAM_DEF(WifiParams, enableDebugSocket),
-        PARAM_DEF(WifiParams, enableDiscovery),
-        PARAM_DEF(WifiParams, discoveryPort),
         PARAM_DEF(WifiParams, logUdpPort),
         PARAM_DEF(WifiParams, logSerialEnabled),
         PARAM_DEF(WifiParams, logUdpEnabled)
