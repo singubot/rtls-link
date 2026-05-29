@@ -18,11 +18,16 @@ DynamicAnchorConfig baseConfig(uint8_t anchorCount)
     return config;
 }
 
+void feedRectangle(DynamicAnchorPositionCalculator& calc, float x, float y)
+{
+    calc.updateDistance(0, 1, x);
+    calc.updateDistance(0, 3, y);
+    calc.updateDistance(0, 2, std::sqrt(x * x + y * y));
+}
+
 void feedBaseRectangle(DynamicAnchorPositionCalculator& calc)
 {
-    calc.updateDistance(0, 1, 5.0f);
-    calc.updateDistance(0, 3, 3.0f);
-    calc.updateDistance(0, 2, std::sqrt(34.0f));
+    feedRectangle(calc, 5.0f, 3.0f);
 }
 
 void feedBaseRectangleAt(DynamicAnchorPositionCalculator& calc, uint32_t timestamp)
@@ -40,26 +45,26 @@ void feedVerticalPairs(DynamicAnchorPositionCalculator& calc, float separation)
     calc.updateDistance(3, 7, separation);
 }
 
-void feedUpperRectangle(DynamicAnchorPositionCalculator& calc)
+void feedUpperRectangle(DynamicAnchorPositionCalculator& calc, float x = 5.0f, float y = 3.0f)
 {
-    calc.updateDistance(4, 5, 5.0f);
-    calc.updateDistance(4, 7, 3.0f);
-    calc.updateDistance(4, 6, std::sqrt(34.0f));
+    calc.updateDistance(4, 5, x);
+    calc.updateDistance(4, 7, y);
+    calc.updateDistance(4, 6, std::sqrt(x * x + y * y));
 }
 
-void feedCrossPlaneChecks(DynamicAnchorPositionCalculator& calc, float separation)
+void feedCrossPlaneChecks(DynamicAnchorPositionCalculator& calc, float separation, float x = 5.0f, float y = 3.0f)
 {
-    calc.updateDistance(0, 5, std::sqrt(25.0f + separation * separation));
-    calc.updateDistance(0, 7, std::sqrt(9.0f + separation * separation));
-    calc.updateDistance(0, 6, std::sqrt(34.0f + separation * separation));
+    calc.updateDistance(0, 5, std::sqrt(x * x + separation * separation));
+    calc.updateDistance(0, 7, std::sqrt(y * y + separation * separation));
+    calc.updateDistance(0, 6, std::sqrt(x * x + y * y + separation * separation));
 }
 
-void feedEightAnchorLayout(DynamicAnchorPositionCalculator& calc, float separation)
+void feedEightAnchorLayout(DynamicAnchorPositionCalculator& calc, float separation, float x = 5.0f, float y = 3.0f)
 {
-    feedBaseRectangle(calc);
+    feedRectangle(calc, x, y);
     feedVerticalPairs(calc, separation);
-    feedUpperRectangle(calc);
-    feedCrossPlaneChecks(calc, separation);
+    feedUpperRectangle(calc, x, y);
+    feedCrossPlaneChecks(calc, separation, x, y);
 }
 
 void expectPoint(const point_t& p, float x, float y, float z)
@@ -180,6 +185,48 @@ TEST(DynamicAnchorPositions, FinalizedDistancesExpire)
 
     EXPECT_TRUE(calc.canCalculateAt(100 + STALENESS_TIMEOUT_TICKS));
     EXPECT_FALSE(calc.canCalculateAt(101 + STALENESS_TIMEOUT_TICKS));
+}
+
+TEST(DynamicAnchorPositions, LockMaskPreservesFourAnchorPositionUntilUnlock)
+{
+    DynamicAnchorPositionCalculator calc;
+    calc.init(baseConfig(4));
+    feedBaseRectangle(calc);
+
+    point_t positions[4] = {};
+    ASSERT_TRUE(calc.calculatePositions(positions, 4));
+    expectPoint(positions[1], 5.0f, 0.0f, -1.5f);
+
+    calc.setLockedMask(1 << 1);
+    feedRectangle(calc, 7.0f, 4.0f);
+    ASSERT_TRUE(calc.calculatePositions(positions, 4));
+    expectPoint(positions[1], 5.0f, 0.0f, -1.5f);
+    expectPoint(positions[2], 7.0f, 4.0f, -1.5f);
+
+    calc.setLockedMask(0);
+    ASSERT_TRUE(calc.calculatePositions(positions, 4));
+    expectPoint(positions[1], 7.0f, 0.0f, -1.5f);
+}
+
+TEST(DynamicAnchorPositions, LockMaskPreservesEightAnchorPositionUntilUnlock)
+{
+    DynamicAnchorPositionCalculator calc;
+    calc.init(baseConfig(8));
+    feedEightAnchorLayout(calc, 2.0f);
+
+    point_t positions[8] = {};
+    ASSERT_TRUE(calc.calculatePositions(positions, 8));
+    expectPoint(positions[5], 5.0f, 0.0f, -3.5f);
+
+    calc.setLockedMask(1 << 5);
+    feedEightAnchorLayout(calc, 2.0f, 7.0f, 4.0f);
+    ASSERT_TRUE(calc.calculatePositions(positions, 8));
+    expectPoint(positions[5], 5.0f, 0.0f, -3.5f);
+    expectPoint(positions[6], 7.0f, 4.0f, -3.5f);
+
+    calc.setLockedMask(0);
+    ASSERT_TRUE(calc.calculatePositions(positions, 8));
+    expectPoint(positions[5], 7.0f, 0.0f, -3.5f);
 }
 
 int main(int argc, char** argv)

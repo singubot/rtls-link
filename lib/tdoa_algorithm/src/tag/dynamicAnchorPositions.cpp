@@ -77,7 +77,9 @@ void DynamicAnchorPositionCalculator::reset() {
         }
         m_validDistanceMask[i] = 0;
         m_lockedPositions[i] = {0, 0, 0, 0};
+        m_lockedPositionValid[i] = false;
         m_lastCalculatedPositions[i] = {0, 0, 0, 0};
+        m_lastCalculatedPositionValid[i] = false;
     }
 }
 
@@ -222,13 +224,18 @@ bool DynamicAnchorPositionCalculator::calculatePositions(point_t* positions, uin
         return false;
     }
 
-    // Apply locking: use locked positions for locked anchors, calculated for others
     for (uint8_t i = 0; i < count; i++) {
-        if (isAnchorLocked(i)) {
+        m_lastCalculatedPositions[i] = newPositions[i];
+        m_lastCalculatedPositionValid[i] = true;
+
+        if (isAnchorLocked(i) && m_lockedPositionValid[i]) {
             positions[i] = m_lockedPositions[i];
+        } else if (isAnchorLocked(i)) {
+            m_lockedPositions[i] = newPositions[i];
+            m_lockedPositionValid[i] = true;
+            positions[i] = newPositions[i];
         } else {
             positions[i] = newPositions[i];
-            m_lastCalculatedPositions[i] = newPositions[i];
         }
     }
 
@@ -349,14 +356,31 @@ bool DynamicAnchorPositionCalculator::validateRectangular(float dX, float dY, fl
     return true;
 }
 
+void DynamicAnchorPositionCalculator::setLockedMask(uint8_t mask) {
+    const uint8_t supportedMask = mask & ((1u << MAX_DYNAMIC_ANCHORS) - 1u);
+    const uint8_t newlyLocked = supportedMask & ~m_config.lockedMask;
+
+    for (uint8_t i = 0; i < MAX_DYNAMIC_ANCHORS; i++) {
+        const uint8_t bit = (1u << i);
+        if ((supportedMask & bit) == 0) {
+            m_lockedPositionValid[i] = false;
+            continue;
+        }
+        if ((newlyLocked & bit) != 0 && m_lastCalculatedPositionValid[i]) {
+            m_lockedPositions[i] = m_lastCalculatedPositions[i];
+            m_lockedPositionValid[i] = true;
+        }
+    }
+
+    m_config.lockedMask = supportedMask;
+}
+
 void DynamicAnchorPositionCalculator::lockAnchor(uint8_t anchorId) {
     if (anchorId >= MAX_DYNAMIC_ANCHORS) {
         return;
     }
 
-    // Store current calculated position before locking
-    m_lockedPositions[anchorId] = m_lastCalculatedPositions[anchorId];
-    m_config.lockedMask |= (1 << anchorId);
+    setLockedMask(m_config.lockedMask | (1 << anchorId));
 }
 
 void DynamicAnchorPositionCalculator::unlockAnchor(uint8_t anchorId) {
@@ -364,7 +388,7 @@ void DynamicAnchorPositionCalculator::unlockAnchor(uint8_t anchorId) {
         return;
     }
 
-    m_config.lockedMask &= ~(1 << anchorId);
+    setLockedMask(m_config.lockedMask & ~(1 << anchorId));
 }
 
 bool DynamicAnchorPositionCalculator::isAnchorLocked(uint8_t anchorId) const {

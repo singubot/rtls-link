@@ -579,6 +579,36 @@ static void giveDynamicCalcMutex()
         xSemaphoreGive(s_dynamicCalcMutex);
     }
 }
+
+void UWBTagTDoA::ClearDynamicAnchorRuntimeState(bool resetCalculator, bool clearLiveAnchors)
+{
+    s_dynamicPositionsReadyForEstimator.store(false, std::memory_order_relaxed);
+    s_dynamicEstimatorReinitRequested.store(false, std::memory_order_relaxed);
+    s_dynamicTransitionHoldoffUntilMs.store(0, std::memory_order_relaxed);
+    s_lastPositionUpdate = 0;
+
+    if (resetCalculator && takeDynamicCalcMutex(pdMS_TO_TICKS(50))) {
+        s_dynamicCalc.reset();
+        giveDynamicCalcMutex();
+    }
+
+    if (clearLiveAnchors
+        && measurements_mtx != nullptr
+        && xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+        for (uint8_t i = 0; i < kNumAnchors; i++) {
+            configured_anchor_ids[i] = false;
+            anchor_positions[i] = {};
+        }
+        clearFreshMeasurementsLocked();
+        xSemaphoreGive(measurements_mtx);
+    }
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    if (clearLiveAnchors) {
+        clearRtlslinkBeaconDynamicAnchors();
+    }
+#endif
+}
 #endif
 
 // Event-driven (continuous) task — body blocks on xTaskNotifyTake with a
@@ -737,6 +767,20 @@ void UWBTagTDoA::Update()
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
     // Periodically update anchor positions from dynamic calculation
     maybeUpdateDynamicPositions();
+#endif
+}
+
+void UWBTagTDoA::SetEnabled(bool enabled)
+{
+    if (enabled) {
+        return;
+    }
+
+    isr_flag = false;
+    m_DwData.interrupt_flags = 0;
+
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+    ClearDynamicAnchorRuntimeState(true, true);
 #endif
 }
 
@@ -1436,21 +1480,24 @@ void UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(uint8_t enabled) {
             LOG_INFO("Dynamic anchor positioning disabled at runtime");
         }
         s_useDynamicPositions = false;
-        s_dynamicPositionsReadyForEstimator.store(false, std::memory_order_relaxed);
-        s_dynamicEstimatorReinitRequested.store(false, std::memory_order_relaxed);
-        s_dynamicTransitionHoldoffUntilMs.store(0, std::memory_order_relaxed);
+        uwbTdoa2TagSetDistanceCallback(nullptr);
+        ClearDynamicAnchorRuntimeState(true, false);
         return;
     }
 
     if (!s_useDynamicPositions) {
-        LOG_WARN("Dynamic anchor positioning enabled at runtime; reboot required to start dynamic calculations");
+        s_useDynamicPositions = true;
+        ClearDynamicAnchorRuntimeState(true, true);
+        ApplyDynamicAnchorRuntimeConfig(Front::uwbLittleFSFront.GetParams());
+        uwbTdoa2TagSetDistanceCallback(&UWBTagTDoA::onInterAnchorDistance);
+        LOG_INFO("Dynamic anchor positioning enabled at runtime; waiting for calculated geometry");
     }
 }
 
 void UWBTagTDoA::ApplyDynamicAnchorRuntimeConfig(const UWBParams& params) {
     if (!s_useDynamicPositions) {
         if (params.dynamicAnchorPosEnabled != 0) {
-            LOG_WARN("Dynamic anchor runtime config saved; reboot required to start dynamic calculations");
+            LOG_WARN("Dynamic anchor runtime config skipped because dynamic positioning is not active");
         }
         return;
     }
@@ -1490,6 +1537,21 @@ void UWBTagTDoA::ApplyDynamicAnchorRuntimeConfig(const UWBParams& params) {
              params.anchorHeight,
              params.anchorPlaneSeparation,
              params.distanceAvgSamples);
+}
+
+void UWBTagTDoA::ApplyDynamicAnchorLockMask(uint8_t lockedMask) {
+    if (!s_useDynamicPositions) {
+        return;
+    }
+
+    if (!takeDynamicCalcMutex(pdMS_TO_TICKS(50))) {
+        LOG_ERROR("Dynamic anchor lock mask skipped - calculator mutex unavailable");
+        return;
+    }
+    s_dynamicCalc.setLockedMask(lockedMask);
+    giveDynamicCalcMutex();
+
+    LOG_INFO("Dynamic anchor lock mask applied (mask=0x%02X)", lockedMask);
 }
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND

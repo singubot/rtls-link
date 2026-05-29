@@ -143,6 +143,12 @@ bool isDynamicAnchorRuntimeParam(const char* name)
         || strcmp(name, "anchorPosLocked") == 0;
 }
 
+bool isDynamicAnchorReinitRuntimeParam(const char* name)
+{
+    return isDynamicAnchorRuntimeParam(name)
+        && strcmp(name, "anchorPosLocked") != 0;
+}
+
 bool validateDynamicTagGeometryForParams(const UWBParams& params)
 {
     if (!dynamicTagGeometryEnabled(params)) {
@@ -460,7 +466,7 @@ bool UWBLittleFSFrontend::ApplyStaticAnchorsToLiveBackends(bool applyEstimator, 
             (void)applyRtlslinkBeacon;
 #endif
             if (applyEstimator) {
-                LOG_INFO("Dynamic anchor positioning saved; reboot required to start dynamic calculations");
+                LOG_INFO("Dynamic anchor positioning pending; dynamic calculations are not active");
             }
             return true;
         }
@@ -674,9 +680,15 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
     if (m_Params.mode == UWBMode::TAG_TDOA
         && dynamicTagGeometryEnabled(m_Params)
         && isDynamicAnchorRuntimeParam(name)) {
-        UWBTagTDoA::ApplyDynamicAnchorRuntimeConfig(m_Params);
+        if (strcmp(name, "anchorPosLocked") == 0) {
+            UWBTagTDoA::ApplyDynamicAnchorLockMask(m_Params.anchorPosLocked);
+        } else if (isDynamicAnchorReinitRuntimeParam(name)) {
+            UWBTagTDoA::ApplyDynamicAnchorRuntimeConfig(m_Params);
+        }
 #ifdef USE_RTLSLINK_BEACON_BACKEND
-        ClearRtlslinkBeaconAnchors();
+        if (isDynamicAnchorReinitRuntimeParam(name)) {
+            ClearRtlslinkBeaconAnchors();
+        }
 #endif
     }
 #endif

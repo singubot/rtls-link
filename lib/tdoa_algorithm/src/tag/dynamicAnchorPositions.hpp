@@ -169,7 +169,7 @@ public:
      * @brief Set the locked anchor bitmask
      * @param mask Bitmask where bit N indicates anchor N is locked
      */
-    void setLockedMask(uint8_t mask) { m_config.lockedMask = mask; }
+    void setLockedMask(uint8_t mask);
 
     /**
      * @brief Get the current locked anchor bitmask
@@ -235,12 +235,14 @@ private:
 
     // Locked positions (preserved when anchor is locked)
     point_t m_lockedPositions[MAX_DYNAMIC_ANCHORS];
+    bool m_lockedPositionValid[MAX_DYNAMIC_ANCHORS];
 
     // Bitmask indicating which averaged distances are valid
     uint8_t m_validDistanceMask[MAX_DYNAMIC_ANCHORS];
 
     // Last calculated positions (for locking)
     point_t m_lastCalculatedPositions[MAX_DYNAMIC_ANCHORS];
+    bool m_lastCalculatedPositionValid[MAX_DYNAMIC_ANCHORS];
 
     /**
      * @brief Calculate positions for rectangular layout

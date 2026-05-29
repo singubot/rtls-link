@@ -33,6 +33,7 @@ public:
     void OnEvent();             // Called outside ISR context
 
     void Update() override;
+    void SetEnabled(bool enabled) override;
 
     virtual uint32_t GetNumberOfConnectedDevices() override;
 
@@ -76,6 +77,7 @@ public:
     static uint8_t GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8_t maxCount);
     static void ApplyDynamicAnchorPositioningEnabled(uint8_t enabled);
     static void ApplyDynamicAnchorRuntimeConfig(const UWBParams& params);
+    static void ApplyDynamicAnchorLockMask(uint8_t lockedMask);
     static bool AreDynamicPositionsReadyForEstimator();
 #ifdef USE_RTLSLINK_BEACON_BACKEND
     static bool ConfigureRtlslinkBeaconFromCurrentAnchors();
@@ -114,6 +116,7 @@ private:
 
     // Callback for inter-anchor distance updates from tdoa_tag_algorithm
     static void onInterAnchorDistance(uint8_t fromAnchor, uint8_t toAnchor, uint16_t distanceTimestampUnits, uint16_t fromAntennaDelay);
+    static void ClearDynamicAnchorRuntimeState(bool resetCalculator, bool clearLiveAnchors);
 
     // Check and apply dynamic position updates
     void maybeUpdateDynamicPositions();
