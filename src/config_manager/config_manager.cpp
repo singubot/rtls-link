@@ -293,6 +293,14 @@ ConfigError validateStoredUwbAnchorConfig(const char* path)
         }
         return ConfigError::INVALID_CONFIG;
     }
+    if (use2DEstimator != 0 && anchorCount < 4) {
+        LOG_ERROR("ConfigManager: Config %s has too few static anchors for 2D TAG_TDOA", path);
+        return ConfigError::INVALID_CONFIG;
+    }
+    if (use2DEstimator == 0 && anchorCount < 5) {
+        LOG_ERROR("ConfigManager: Config %s has too few static anchors for 3D TAG_TDOA", path);
+        return ConfigError::INVALID_CONFIG;
+    }
 
     bool seen[kMaxConfigAnchors] = {};
     for (uint8_t slot = 0; slot < anchorCount; slot++) {

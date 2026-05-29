@@ -991,6 +991,15 @@ bool UWBTagTDoA::ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorPara
     if (!ValidateStaticAnchors(anchors)) {
         return false;
     }
+    if (use2DEstimator && anchors.size() < 4) {
+        LOG_ERROR("Rejected static anchor config: 2D estimator requires at least 4 anchors");
+        return false;
+    }
+    if (!use2DEstimator && anchors.size() < kMin3DUniqueAnchorsForSolve) {
+        LOG_ERROR("Rejected static anchor config: 3D estimator requires at least %u anchors",
+                  static_cast<unsigned int>(kMin3DUniqueAnchorsForSolve));
+        return false;
+    }
     if (!use2DEstimator && !anchorsAreNonCoplanar3D(anchors)) {
         LOG_ERROR("Rejected static anchor config: 3D estimator requires non-coplanar anchors");
         return false;
