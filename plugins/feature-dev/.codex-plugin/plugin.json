@@ -26,7 +26,7 @@
       "GitHub"
     ],
     "defaultPrompt": [
-      "Use feature-dev for this feature: "
+      "Use $feature-dev for this feature:\n\n"
     ],
     "brandColor": "#2563EB"
   }

@@ -9,10 +9,6 @@ Use this workflow in three phases:
 - Do not edit product code before Phase 3.
 - Agreement files under `.agents/agreements/` are local-only notes. Never stage, commit, push, quote broadly, or copy them into tracked files.
 
-## Inputs
-- Feature title: `$ARGUMENTS`.
-- If the title is missing or unclear, ask for a short title before continuing.
-
 ## Phase 1: Discussion and Alignment
 1. Understand the user intent, acceptance criteria, non-goals, constraints, and expected testing scope.
 2. Inspect the relevant codebase areas before settling on implementation details.
