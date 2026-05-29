@@ -1,7 +1,7 @@
 {
   "name": "feature-dev",
   "version": "0.1.0",
-  "description": "Discuss, align, implement in a worktree, and open a draft PR for a new feature.",
+  "description": "Discuss, audit, implement in a worktree, and open a draft PR for a new feature.",
   "author": {
     "name": "MarcEspuna",
     "email": "mespuna@cactusiot.com",
@@ -17,7 +17,7 @@
   "interface": {
     "displayName": "Feature Dev",
     "shortDescription": "Plan and deliver features through a draft PR workflow.",
-    "longDescription": "Guides Codex through mandatory alignment, worktree-based implementation, validation, review, commit, push, and draft PR creation for new feature work.",
+    "longDescription": "Guides Codex through alignment, audit, explicit execution approval, worktree-based implementation, validation, review, commit, push, and draft PR creation for new feature work.",
     "developerName": "Mespuna IoT",
     "category": "Development",
     "capabilities": [
