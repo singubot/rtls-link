@@ -711,44 +711,37 @@ void App::SendSample(float x_m, float y_m, float z_m,
     return;
   }
 
-  // Check if we have received a heartbeat recently
-#ifdef USE_MAVLINK_HEARTBEAT
-  bool heartbeatOk = (millis() - app.last_heartbeat_received_timestamp_ms_ < kHeartbeatRcvTimeoutMs);
-#else
-  bool heartbeatOk = true;  // Always send if no heartbeat checking
-#endif
-
-  if (heartbeatOk) {
+  // Do not gate VISION_POSITION_ESTIMATE on inbound AP heartbeat; missed
+  // heartbeat reception must not create outbound external-nav gaps.
 #ifdef USE_MAVLINK_COVARIANCE
-    // Defense in depth: also check enableCovMatrix parameter here
-    bool sendCovMatrix = positionCovariance.has_value() &&
-                         Front::uwbLittleFSFront.GetParams().enableCovMatrix != 0;
+  // Defense in depth: also check enableCovMatrix parameter here
+  bool sendCovMatrix = positionCovariance.has_value() &&
+                       Front::uwbLittleFSFront.GetParams().enableCovMatrix != 0;
 
-    if (sendCovMatrix) {
-      // Rotate covariance to match rotated position
-      float rotationDegrees = Front::uwbLittleFSFront.GetParams().rotationDegrees;
-      float yaw_rad = rotationDegrees * M_PI / 180.0f;
+  if (sendCovMatrix) {
+    // Rotate covariance to match rotated position
+    float rotationDegrees = Front::uwbLittleFSFront.GetParams().rotationDegrees;
+    float yaw_rad = rotationDegrees * M_PI / 180.0f;
 
-      std::array<float, 6> rotatedCov = rotateCovarianceByYaw(*positionCovariance, yaw_rad);
-      std::array<float, VISION_POSITION_COVARIANCE_SIZE> mavCov = mapToMAVLinkCovariance(rotatedCov);
+    std::array<float, 6> rotatedCov = rotateCovarianceByYaw(*positionCovariance, yaw_rad);
+    std::array<float, VISION_POSITION_COVARIANCE_SIZE> mavCov = mapToMAVLinkCovariance(rotatedCov);
 
-      app.local_position_sensor_.send_vision_position_estimate(
-          rotated_vector.x, rotated_vector.y, rotated_vector.z,
-          0, 0, 0,  // No orientation from UWB
-          &mavCov);
-    } else
+    app.local_position_sensor_.send_vision_position_estimate(
+        rotated_vector.x, rotated_vector.y, rotated_vector.z,
+        0, 0, 0,  // No orientation from UWB
+        &mavCov);
+  } else
 #endif // USE_MAVLINK_COVARIANCE
-    {
-      // No covariance - send with nullptr (will use NaN)
-      app.local_position_sensor_.send_vision_position_estimate(
-          rotated_vector.x, rotated_vector.y, rotated_vector.z,
-          0, 0, 0);
-    }
-    app.last_sample_timestamp_ms_ = millis();
-#ifdef USE_RATE_STATISTICS
-    app.RecordSampleTimestamp();  // Track for rate statistics
-#endif
+  {
+    // No covariance - send with nullptr (will use NaN)
+    app.local_position_sensor_.send_vision_position_estimate(
+        rotated_vector.x, rotated_vector.y, rotated_vector.z,
+        0, 0, 0);
   }
+  app.last_sample_timestamp_ms_ = millis();
+#ifdef USE_RATE_STATISTICS
+  app.RecordSampleTimestamp();  // Track for rate statistics
+#endif
 #endif // USE_MAVLINK && USE_MAVLINK_POSITION
 }
 #endif // HAS_POSITION_OUTPUT
@@ -756,6 +749,9 @@ void App::SendSample(float x_m, float y_m, float z_m,
 #ifdef USE_RTLSLINK_BEACON_BACKEND
 bool App::ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam> anchors)
 {
+  if (!IsRtlslinkBeaconOutputSelected()) {
+    return true;
+  }
   return app.rtlslink_beacon_backend_.ConfigureAnchors(anchors, Front::uwbLittleFSFront.GetParams().rotationDegrees);
 }
 

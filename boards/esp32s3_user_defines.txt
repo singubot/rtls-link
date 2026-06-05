@@ -90,4 +90,4 @@
 -D USE_LOGGING                  ; Master logging toggle
 -D USE_LOGGING_SERIAL           ; Serial output (enabled by default)
 -D USE_LOGGING_UDP              ; UDP streaming to rtls-link-manager
--D LOG_GLOBAL_LEVEL=3
+-D RTLS_LOG_GLOBAL_LEVEL=3
