@@ -266,7 +266,7 @@ static bool IsUwbShortAddrName(const char* name) {
     }
     if (strncmp(name, "devId", 5) == 0) {
         char idx = name[5];
-        return idx >= '1' && idx <= '6' && name[6] == '\0';
+        return idx >= '1' && idx <= '8' && name[6] == '\0';
     }
     return false;
 }
@@ -280,6 +280,8 @@ static const UWBShortAddr* GetUwbShortAddrByName(const char* name) {
     if (strcmp(name, "devId4") == 0) return &params.devId4;
     if (strcmp(name, "devId5") == 0) return &params.devId5;
     if (strcmp(name, "devId6") == 0) return &params.devId6;
+    if (strcmp(name, "devId7") == 0) return &params.devId7;
+    if (strcmp(name, "devId8") == 0) return &params.devId8;
     return nullptr;
 }
 

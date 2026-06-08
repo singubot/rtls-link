@@ -94,8 +94,8 @@
 
 // Default global log level (INFO = 3)
 // Can be overridden in platformio.ini or user_defines.txt
-#ifndef LOG_GLOBAL_LEVEL
-    #define LOG_GLOBAL_LEVEL 3
+#ifndef RTLS_LOG_GLOBAL_LEVEL
+    #define RTLS_LOG_GLOBAL_LEVEL 3
 #endif
 
 // =============================================================================

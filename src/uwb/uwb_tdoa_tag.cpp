@@ -1662,6 +1662,8 @@ void UWBTagTDoA::maybeUpdateDynamicPositions() {
         // This prevents race conditions with estimatorProcess() which reads these values
         if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
             for (uint8_t i = 0; i < dynamic_anchor_count; i++) {
+                anchor_positions[i].shortAddr[0] = static_cast<char>('0' + i);
+                anchor_positions[i].shortAddr[1] = '\0';
                 anchor_positions[i].x = newPositions[i].x;
                 anchor_positions[i].y = newPositions[i].y;
                 anchor_positions[i].z = newPositions[i].z;

@@ -4,13 +4,13 @@
  *
  * This file provides compile-time configurable logging with:
  * - Automatic tag extraction from __FILE__ (zero runtime overhead)
- * - Per-module log level overrides via LOG_LOCAL_LEVEL
+ * - Per-module log level overrides via RTLS_LOG_LOCAL_LEVEL
  * - Printf-style formatting
  * - Dual output: Serial and UDP (when enabled)
  *
  * Usage:
  *   // In your source file (optional: set per-file log level)
- *   #define LOG_LOCAL_LEVEL 5  // VERBOSE for this module
+ *   #define RTLS_LOG_LOCAL_LEVEL 5  // VERBOSE for this module
  *   #include "logging/logging.hpp"
  *
  *   void myFunction() {
@@ -83,18 +83,20 @@ constexpr size_t filenameBaseLength(const char* filename) {
 // Log Level Configuration
 // =============================================================================
 
-// Default global log level if not specified
-#ifndef LOG_GLOBAL_LEVEL
+// Default global log level if not specified.
+// Use RTLS-owned macro names: ESP-IDF/Arduino define LOG_LOCAL_LEVEL for
+// their own logger, and sharing that namespace can compile RTLS logs out.
+#ifndef RTLS_LOG_GLOBAL_LEVEL
     #ifdef USE_LOGGING
-        #define LOG_GLOBAL_LEVEL 3  // INFO by default
+        #define RTLS_LOG_GLOBAL_LEVEL 3  // INFO by default
     #else
-        #define LOG_GLOBAL_LEVEL 0  // Disabled if USE_LOGGING not defined
+        #define RTLS_LOG_GLOBAL_LEVEL 0  // Disabled if USE_LOGGING not defined
     #endif
 #endif
 
 // Per-file override - defaults to global level
-#ifndef LOG_LOCAL_LEVEL
-    #define LOG_LOCAL_LEVEL LOG_GLOBAL_LEVEL
+#ifndef RTLS_LOG_LOCAL_LEVEL
+    #define RTLS_LOG_LOCAL_LEVEL RTLS_LOG_GLOBAL_LEVEL
 #endif
 
 // =============================================================================
@@ -150,7 +152,7 @@ public:
     static void setUdpTarget(const char* ip, uint16_t port);
 
     // Get current compiled log level (for heartbeat reporting)
-    static constexpr uint8_t getCompiledLogLevel() { return LOG_GLOBAL_LEVEL; }
+    static constexpr uint8_t getCompiledLogLevel() { return RTLS_LOG_GLOBAL_LEVEL; }
 
 private:
     static bool s_initialized;
@@ -179,7 +181,7 @@ private:
 // Core implementation macro - compiles to nothing when level disabled
 #define LOG_IMPL(level, tag, fmt, ...)                                         \
     do {                                                                        \
-        if constexpr (static_cast<uint8_t>(level) <= LOG_LOCAL_LEVEL) {        \
+        if constexpr (static_cast<uint8_t>(level) <= RTLS_LOG_LOCAL_LEVEL) {   \
             rtls::log::Logger::log(level, tag, fmt, ##__VA_ARGS__);            \
         }                                                                       \
     } while (0)
