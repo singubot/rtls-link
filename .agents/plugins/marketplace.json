@@ -17,6 +17,18 @@
       "category": "Productivity"
     },
     {
+      "name": "audit-loop",
+      "source": {
+        "source": "local",
+        "path": "./plugins/audit-loop"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
       "name": "solve-pr-comments",
       "source": {
         "source": "local",

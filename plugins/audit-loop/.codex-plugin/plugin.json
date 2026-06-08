@@ -1,0 +1,31 @@
+{
+  "name": "audit-loop",
+  "version": "0.1.0",
+  "description": "Run a focused multi-agent audit before execution to find blockers, risks, and agreement gaps.",
+  "author": {
+    "name": "MarcEspuna",
+    "email": "mespuna@cactusiot.com",
+    "url": "https://github.com/mespunaiot"
+  },
+  "repository": "https://github.com/marcespuna99/codex-extensions",
+  "keywords": [
+    "audit",
+    "planning",
+    "workflow"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Audit Loop",
+    "shortDescription": "Audit plans for blockers and meaningful risks before execution.",
+    "longDescription": "Guides Codex through a focused audit loop that checks user intent, implementation agreements, and codebase context for blockers, risky assumptions, missing requirements, integration issues, and test gaps before execution starts.",
+    "developerName": "Mespuna IoT",
+    "category": "Development",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Use audit-loop to audit this plan: "
+    ],
+    "brandColor": "#7C3AED"
+  }
+}
