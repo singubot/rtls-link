@@ -2,8 +2,10 @@
 
 #include <Eigen/QR>
 #include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
 
 #include <algorithm>
+#include <limits>
 
 namespace tdoa_estimator {
 
@@ -13,6 +15,8 @@ namespace tdoa_estimator {
     // Tikhonov regularization threshold for covariance computation.
     static constexpr double kRegularizationThreshold = 1e-8;
     static constexpr double kRegularizationFactor = 1e-6;
+    static constexpr double kMinGeometryEigenRatio3D = 1e-5;
+    static constexpr Scalar kResidualConvergenceThreshold = static_cast<Scalar>(1e-6);
 
     // Distance floor: prevents division-by-near-zero in Jacobian rows when the
     // tag sits effectively on top of an anchor. 1e-4 m = 0.1 mm — well below
@@ -145,6 +149,48 @@ namespace tdoa_estimator {
             return J.colwise().squaredNorm().sum();
         }
 
+        bool matrixObservable3D(const CovMatrix3D& matrix, double trace)
+        {
+            if (trace < 1e-10) {
+                return false;
+            }
+
+            Eigen::SelfAdjointEigenSolver<CovMatrix3D> eigensolver(matrix, Eigen::EigenvaluesOnly);
+            if (eigensolver.info() != Eigen::Success) {
+                return false;
+            }
+
+            const double minEigen = eigensolver.eigenvalues().minCoeff();
+            return minEigen > kMinGeometryEigenRatio3D * trace;
+        }
+
+        bool anchorLayoutObservable3D(const PosMatrix& L, const PosMatrix& R)
+        {
+            const int n = static_cast<int>(L.rows());
+            if (n < 4 || R.rows() != L.rows()) {
+                return false;
+            }
+
+            Eigen::Matrix<double, 3, 1> centroid = Eigen::Matrix<double, 3, 1>::Zero();
+            for (int i = 0; i < n; ++i) {
+                centroid += L.row(i).transpose().template cast<double>();
+                centroid += R.row(i).transpose().template cast<double>();
+            }
+            centroid /= static_cast<double>(2 * n);
+
+            CovMatrix3D scatter = CovMatrix3D::Zero();
+            for (int i = 0; i < n; ++i) {
+                Eigen::Matrix<double, 3, 1> dl =
+                    L.row(i).transpose().template cast<double>() - centroid;
+                Eigen::Matrix<double, 3, 1> dr =
+                    R.row(i).transpose().template cast<double>() - centroid;
+                scatter += dl * dl.transpose();
+                scatter += dr * dr.transpose();
+            }
+
+            return matrixObservable3D(scatter, scatter.trace());
+        }
+
         // Compute 3D covariance from the cached float Jacobian. JᵀJ is built in
         // double — small (3x3), runs once at convergence, worth the precision.
         bool computePositionCovariance3D(const PosMatrix& J,
@@ -169,6 +215,11 @@ namespace tdoa_estimator {
             double minDiag = JtJ.diagonal().minCoeff();
 
             if (trace < 1e-10) {
+                outCovariance = CovMatrix3D::Identity() * 100.0;
+                return false;
+            }
+
+            if (!matrixObservable3D(JtJ, trace)) {
                 outCovariance = CovMatrix3D::Identity() * 100.0;
                 return false;
             }
@@ -243,21 +294,33 @@ namespace tdoa_estimator {
         result.converged = false;
         result.valid = true;
         result.iterations = 0;
+        result.rmse = std::numeric_limits<Scalar>::infinity();
         result.covarianceValid = false;
         result.positionCovariance = CovMatrix3D::Identity();
+
+        if (!anchorLayoutObservable3D(L, R)) {
+            result.valid = false;
+            return result;
+        }
 
         SolverContext3D ctx;
 
         PosVector3D pos = initialPos;
         computeResidualsAndDistances3D(L, R, doas, pos, ctx.residuals, ctx.distancesL, ctx.distancesR);
         Scalar prevSse = ctx.residuals.squaredNorm();
+        const Scalar rmse_convergence_sse =
+            kResidualConvergenceThreshold * kResidualConvergenceThreshold
+            * static_cast<Scalar>(doas.size());
+        if (prevSse <= rmse_convergence_sse) {
+            result.converged = true;
+        }
 
         // LM lambda initialized from the scale of the problem.
         buildJacobian3D(L, R, pos, ctx.distancesL, ctx.distancesR, ctx.jacobian);
         Scalar lambda = kLMInitialFactor * trace3(ctx.jacobian) / Scalar(3);
         if (lambda < kLMMinLambda) lambda = kLMMinLambda;
 
-        for (int iter = 0; iter < maxIterations; ++iter) {
+        for (int iter = 0; !result.converged && iter < maxIterations; ++iter) {
             result.iterations++;
 
             buildJacobian3D(L, R, pos, ctx.distancesL, ctx.distancesR, ctx.jacobian);
@@ -309,6 +372,9 @@ namespace tdoa_estimator {
         if (result.rmse > rmseThreshold) {
             result.valid = false;
         }
+        if (!result.converged) {
+            result.valid = false;
+        }
 
         if (result.valid && result.converged) {
             // Rebuild Jacobian one last time at the converged pos. Cheap (one
@@ -327,6 +393,9 @@ namespace tdoa_estimator {
 
             result.covarianceValid = computePositionCovariance3D(
                 ctx.jacobian, measurementVariance, result.positionCovariance);
+            if (!result.covarianceValid) {
+                result.valid = false;
+            }
         }
 
         return result;
@@ -348,6 +417,7 @@ namespace tdoa_estimator {
         result.converged = false;
         result.valid = true;
         result.iterations = 0;
+        result.rmse = std::numeric_limits<Scalar>::infinity();
         result.covarianceValid = false;
         result.positionCovariance = CovMatrix2D::Identity();
 
@@ -359,12 +429,18 @@ namespace tdoa_estimator {
 
         computeResidualsAndDistances3D(L, R, doas, pos3D, ctx.residuals, ctx.distancesL, ctx.distancesR);
         Scalar prevSse = ctx.residuals.squaredNorm();
+        const Scalar rmse_convergence_sse =
+            kResidualConvergenceThreshold * kResidualConvergenceThreshold
+            * static_cast<Scalar>(doas.size());
+        if (prevSse <= rmse_convergence_sse) {
+            result.converged = true;
+        }
 
         buildJacobian2D(L, R, pos3D, ctx.distancesL, ctx.distancesR, ctx.jacobian);
         Scalar lambda = kLMInitialFactor * trace2(ctx.jacobian) / Scalar(2);
         if (lambda < kLMMinLambda) lambda = kLMMinLambda;
 
-        for (int iter = 0; iter < maxIterations; ++iter) {
+        for (int iter = 0; !result.converged && iter < maxIterations; ++iter) {
             result.iterations++;
 
             pos3D << posXY(0), posXY(1), fixedZ;
@@ -410,6 +486,9 @@ namespace tdoa_estimator {
         result.position = posXY;
         result.rmse = std::sqrt(prevSse / static_cast<Scalar>(doas.size()));
         if (result.rmse > rmseThreshold) {
+            result.valid = false;
+        }
+        if (!result.converged) {
             result.valid = false;
         }
 

@@ -26,7 +26,7 @@ struct DeviceTelemetry {
 
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
     bool dynamic_anchors_enabled = false;
-    DynamicAnchorTelemetry dynamic_anchors[4];
+    DynamicAnchorTelemetry dynamic_anchors[8];
     uint8_t dynamic_anchor_count = 0;
 #endif
 };

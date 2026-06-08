@@ -78,6 +78,14 @@ struct UWBParams {
     float x6;
     float y6;
     float z6;
+    UWBShortAddr devId7 = {'6', '\0'};
+    float x7 = 0.0f;
+    float y7 = 0.0f;
+    float z7 = 0.0f;
+    UWBShortAddr devId8 = {'7', '\0'};
+    float x8 = 0.0f;
+    float y8 = 0.0f;
+    float z8 = 0.0f;
     uint16_t ADelay;            // Antenna delay    
     double originLat;           // Origin Latitude
     double originLon;           // Origin Longitude
@@ -127,7 +135,8 @@ struct UWBParams {
     // Dynamic anchor positioning (TDoA tags)
     uint8_t dynamicAnchorPosEnabled = 0;  // 0=static (use configured positions), 1=dynamic (calculate from inter-anchor distances)
     uint8_t anchorLayout = 0;             // AnchorLayout enum value (0=RECTANGULAR_0_ORIGIN)
-    float anchorHeight = 0.0f;            // Height for Z calculation (NED: Z = -height)
+    float anchorHeight = 0.0f;            // Lower-plane height (NED: Z = -height)
+    float anchorPlaneSeparation = 0.0f;   // Vertical distance between lower and upper dynamic anchor planes
     uint8_t anchorPosLocked = 0;          // Bitmask: bit N = anchor N position locked
     uint16_t distanceAvgSamples = 50;     // Number of samples to average before calculating (default: 50)
 
@@ -142,7 +151,7 @@ struct UWBParams {
     uint8_t tdoaAnchorModelHealthQuorum = 5;
 
     // static constant values that will be useful for parameter reading & writing
-    static constexpr uint8_t maxAnchorCount = 6;
+    static constexpr uint8_t maxAnchorCount = 8;
 }ULS_PACKED;
 
 /**

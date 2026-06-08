@@ -7,10 +7,10 @@
 
 namespace {
 
-constexpr std::array<int32_t, 4> kX = {1000, 2000, 3000, 4000};
-constexpr std::array<int32_t, 4> kY = {5000, 6000, 7000, 8000};
-constexpr std::array<int32_t, 4> kZ = {9000, 10000, 11000, 12000};
-constexpr std::array<uint8_t, 4> kIds = {0, 1, 2, 3};
+constexpr std::array<int32_t, 8> kX = {1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000};
+constexpr std::array<int32_t, 8> kY = {9000, 10000, 11000, 12000, 13000, 14000, 15000, 16000};
+constexpr std::array<int32_t, 8> kZ = {-1000, -2000, -3000, -4000, -5000, -6000, -7000, -8000};
+constexpr std::array<uint8_t, 8> kIds = {0, 1, 2, 3, 4, 5, 6, 7};
 constexpr std::array<uint8_t, 4> kIp = {192, 168, 0, 104};
 constexpr std::array<uint8_t, 6> kMac = {1, 2, 3, 4, 5, 6};
 
@@ -18,6 +18,11 @@ void ExpectDynamicAnchorArrays(const mavlink_message_t& message)
 {
     mavlink_rtls_device_status_t status = {};
     mavlink_msg_rtls_device_status_decode(&message, &status);
+
+    EXPECT_EQ(message.len, MAVLINK_MSG_ID_RTLS_DEVICE_STATUS_LEN);
+    EXPECT_EQ(MAVLINK_MSG_ID_RTLS_DEVICE_STATUS_LEN, 175);
+    EXPECT_EQ(MAVLINK_MSG_ID_RTLS_DEVICE_STATUS_MIN_LEN, 175);
+    EXPECT_EQ(MAVLINK_MSG_ID_RTLS_DEVICE_STATUS_CRC, 247);
 
     for (size_t i = 0; i < kX.size(); ++i) {
         EXPECT_EQ(status.dynamic_anchor_id[i], kIds[i]);

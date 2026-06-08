@@ -455,13 +455,13 @@ void WifiMavlinkManagement::SendDeviceStatus()
     copyBoundedString(firmwareVersion, sizeof(firmwareVersion), FIRMWARE_VERSION);
 
     uint8_t dynamicAnchorCount = 0;
-    uint8_t dynamicAnchorIds[4] = {};
-    int32_t dynamicAnchorXmm[4] = {};
-    int32_t dynamicAnchorYmm[4] = {};
-    int32_t dynamicAnchorZmm[4] = {};
+    uint8_t dynamicAnchorIds[8] = {};
+    int32_t dynamicAnchorXmm[8] = {};
+    int32_t dynamicAnchorYmm[8] = {};
+    int32_t dynamicAnchorZmm[8] = {};
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
     if (telemetry.dynamic_anchors_enabled) {
-        dynamicAnchorCount = telemetry.dynamic_anchor_count > 4 ? 4 : telemetry.dynamic_anchor_count;
+        dynamicAnchorCount = telemetry.dynamic_anchor_count > 8 ? 8 : telemetry.dynamic_anchor_count;
         for (uint8_t i = 0; i < dynamicAnchorCount; i++) {
             dynamicAnchorIds[i] = telemetry.dynamic_anchors[i].id;
             dynamicAnchorXmm[i] = rtls::protocol::MetersToMillimeters(telemetry.dynamic_anchors[i].x);

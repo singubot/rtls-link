@@ -34,7 +34,7 @@ namespace tdoa_estimator {
         Scalar rmse;                     // Root Mean Square Error of residuals (m)
         int iterations;                  // Number of iterations performed
         bool converged;                  // True if step/residual delta met threshold
-        bool valid;                      // True if solution is physically plausible
+        bool valid;                      // True if converged, within RMSE threshold, and observable
         CovMatrix3D positionCovariance;  // 3x3 position covariance (double)
         bool covarianceValid;            // True if covariance computation succeeded
     };
@@ -44,7 +44,7 @@ namespace tdoa_estimator {
         Scalar rmse;
         int iterations;
         bool converged;
-        bool valid;
+        bool valid;                      // True if converged and within RMSE threshold
         CovMatrix2D positionCovariance;
         bool covarianceValid;
     };

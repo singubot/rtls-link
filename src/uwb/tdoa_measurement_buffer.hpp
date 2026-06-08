@@ -31,10 +31,16 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
     uint64_t staleThresholdUs,
     size_t minMeasurements,
     MeasurementSlot* out,
-    size_t outCapacity)
+    size_t outCapacity,
+    uint8_t minUniqueAnchors = 0,
+    uint64_t maxBatchSpanUs = 0)
 {
     MeasurementSnapshotResult result;
     size_t usableFresh = 0;
+    etl::array<bool, AnchorCount> usableAnchorSeen = {};
+    uint8_t usableUniqueAnchors = 0;
+    uint64_t minTimestampUs = UINT64_MAX;
+    uint64_t maxTimestampUs = 0;
 
     for (auto& slot : slots) {
         if (!slot.fresh) {
@@ -50,10 +56,57 @@ MeasurementSnapshotResult SnapshotFreshMeasurements(
             continue;
         }
         ++usableFresh;
+        if (slot.timestamp_us < minTimestampUs) {
+            minTimestampUs = slot.timestamp_us;
+        }
+        if (slot.timestamp_us > maxTimestampUs) {
+            maxTimestampUs = slot.timestamp_us;
+        }
+        if (!usableAnchorSeen[slot.anchor_a]) {
+            usableAnchorSeen[slot.anchor_a] = true;
+            ++usableUniqueAnchors;
+        }
+        if (!usableAnchorSeen[slot.anchor_b]) {
+            usableAnchorSeen[slot.anchor_b] = true;
+            ++usableUniqueAnchors;
+        }
     }
 
-    result.haveEnough = usableFresh >= minMeasurements;
+    result.haveEnough = usableFresh >= minMeasurements
+                     && usableUniqueAnchors >= minUniqueAnchors;
     result.measurementCountForStats = usableFresh;
+    if (result.haveEnough
+        && maxBatchSpanUs > 0
+        && (maxTimestampUs - minTimestampUs) > maxBatchSpanUs) {
+        const uint64_t oldestAllowedUs = maxTimestampUs - maxBatchSpanUs;
+        usableFresh = 0;
+        usableAnchorSeen.fill(false);
+        usableUniqueAnchors = 0;
+
+        for (auto& slot : slots) {
+            if (!slot.fresh) {
+                continue;
+            }
+            if (slot.timestamp_us < oldestAllowedUs) {
+                slot.fresh = false;
+                ++result.expired;
+                continue;
+            }
+            ++usableFresh;
+            if (!usableAnchorSeen[slot.anchor_a]) {
+                usableAnchorSeen[slot.anchor_a] = true;
+                ++usableUniqueAnchors;
+            }
+            if (!usableAnchorSeen[slot.anchor_b]) {
+                usableAnchorSeen[slot.anchor_b] = true;
+                ++usableUniqueAnchors;
+            }
+        }
+
+        result.haveEnough = usableFresh >= minMeasurements
+                         && usableUniqueAnchors >= minUniqueAnchors;
+        result.measurementCountForStats = usableFresh;
+    }
     if (!result.haveEnough) {
         return result;
     }

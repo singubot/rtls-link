@@ -266,7 +266,7 @@ static bool IsUwbShortAddrName(const char* name) {
     }
     if (strncmp(name, "devId", 5) == 0) {
         char idx = name[5];
-        return idx >= '1' && idx <= '6' && name[6] == '\0';
+        return idx >= '1' && idx <= '8' && name[6] == '\0';
     }
     return false;
 }
@@ -280,6 +280,8 @@ static const UWBShortAddr* GetUwbShortAddrByName(const char* name) {
     if (strcmp(name, "devId4") == 0) return &params.devId4;
     if (strcmp(name, "devId5") == 0) return &params.devId5;
     if (strcmp(name, "devId6") == 0) return &params.devId6;
+    if (strcmp(name, "devId7") == 0) return &params.devId7;
+    if (strcmp(name, "devId8") == 0) return &params.devId8;
     return nullptr;
 }
 
@@ -609,6 +611,10 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
             case ConfigError::FILE_SYSTEM_ERROR:
                 status = rtls::protocol::StatusCode::FileSystemError;
                 message = "File system error";
+                break;
+            case ConfigError::INVALID_CONFIG:
+                status = rtls::protocol::StatusCode::Error;
+                message = "Invalid configuration";
                 break;
             default:
                 status = rtls::protocol::StatusCode::Error;
@@ -1175,6 +1181,9 @@ static void saveConfigAsCallback(cmd* c)
         case ConfigError::FILE_SYSTEM_ERROR:
             commandResult = "{\"success\":false,\"error\":\"File system error\"}";
             break;
+        case ConfigError::INVALID_CONFIG:
+            commandResult = "{\"success\":false,\"error\":\"Invalid configuration\"}";
+            break;
         default:
             commandResult = "{\"success\":false,\"error\":\"Unknown error\"}";
             break;
@@ -1201,6 +1210,9 @@ static void loadConfigNamedCallback(cmd* c)
             break;
         case ConfigError::FILE_SYSTEM_ERROR:
             commandResult = "{\"success\":false,\"error\":\"File system error\"}";
+            break;
+        case ConfigError::INVALID_CONFIG:
+            commandResult = "{\"success\":false,\"error\":\"Invalid configuration\"}";
             break;
         default:
             commandResult = "{\"success\":false,\"error\":\"Unknown error\"}";

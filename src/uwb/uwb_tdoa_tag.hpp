@@ -25,8 +25,6 @@ extern "C" {
 struct DynamicAnchorTelemetry;
 #endif
 
-#define MAX_ANCHORS 6
-
 class UWBTagTDoA : public UWBBackend {
 public:
     UWBTagTDoA(const bsp::UWBConfig& uwb_config, etl::span<const UWBAnchorParam> anchors);
@@ -35,6 +33,7 @@ public:
     void OnEvent();             // Called outside ISR context
 
     void Update() override;
+    void SetEnabled(bool enabled) override;
 
     virtual uint32_t GetNumberOfConnectedDevices() override;
 
@@ -53,6 +52,9 @@ public:
     static String ExportAnchorModelJson();
     static String GetEstimatorStatsJson();
     static void ResetEstimatorStats();
+    static bool ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors);
+    static bool ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorParam> anchors, bool use2DEstimator);
+    static bool ApplyStaticAnchors(etl::span<const UWBAnchorParam> anchors);
 #ifdef ESP32S3_UWB_BOARD
     static void ApplyMatcherPolicy(uint8_t policy);
 #endif
@@ -73,6 +75,13 @@ public:
      * @return Number of positions written to out array
      */
     static uint8_t GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8_t maxCount);
+    static void ApplyDynamicAnchorPositioningEnabled(uint8_t enabled);
+    static void ApplyDynamicAnchorRuntimeConfig(const UWBParams& params);
+    static void ApplyDynamicAnchorLockMask(uint8_t lockedMask);
+    static bool AreDynamicPositionsReadyForEstimator();
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    static bool ConfigureRtlslinkBeaconFromCurrentAnchors();
+#endif
 #endif
 
 private:
@@ -107,6 +116,7 @@ private:
 
     // Callback for inter-anchor distance updates from tdoa_tag_algorithm
     static void onInterAnchorDistance(uint8_t fromAnchor, uint8_t toAnchor, uint16_t distanceTimestampUnits, uint16_t fromAntennaDelay);
+    static void ClearDynamicAnchorRuntimeState(bool resetCalculator, bool clearLiveAnchors);
 
     // Check and apply dynamic position updates
     void maybeUpdateDynamicPositions();

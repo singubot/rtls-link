@@ -1,6 +1,335 @@
 #include "config_manager.hpp"
 #include "front.hpp"
 #include "logging/logging.hpp"
+#include "uwb/uwb_params.hpp"
+
+#include <cerrno>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+
+namespace {
+
+constexpr uint8_t kMaxConfigAnchors = 8;
+constexpr const char* kParamsFile = "/params.txt";
+constexpr const char* kParamsLoadBackupFile = "/params.load.bak";
+
+struct StoredAnchorConfig {
+    bool devIdPresent = false;
+    bool xPresent = false;
+    bool yPresent = false;
+    bool zPresent = false;
+    uint8_t devId = 0;
+};
+
+bool parseU8Strict(String value, uint8_t& out)
+{
+    value.trim();
+    if (value.length() == 0) {
+        return false;
+    }
+
+    uint16_t parsed = 0;
+    for (uint16_t i = 0; i < value.length(); i++) {
+        const char c = value.charAt(i);
+        if (!isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+        parsed = static_cast<uint16_t>(parsed * 10 + (c - '0'));
+        if (parsed > UINT8_MAX) {
+            return false;
+        }
+    }
+
+    out = static_cast<uint8_t>(parsed);
+    return true;
+}
+
+bool parseFiniteFloatStrict(String value, float* out = nullptr)
+{
+    value.trim();
+    if (value.length() == 0) {
+        return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const float parsed = strtof(value.c_str(), &end);
+    if (end == value.c_str() || errno == ERANGE || !std::isfinite(parsed)) {
+        return false;
+    }
+    while (end != nullptr && *end != '\0') {
+        if (!isspace(static_cast<unsigned char>(*end))) {
+            return false;
+        }
+        end++;
+    }
+    if (out != nullptr) {
+        *out = parsed;
+    }
+    return true;
+}
+
+bool parseFiniteDoubleStrict(String value)
+{
+    value.trim();
+    if (value.length() == 0) {
+        return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const double parsed = strtod(value.c_str(), &end);
+    if (end == value.c_str() || errno == ERANGE || !std::isfinite(parsed)) {
+        return false;
+    }
+    while (end != nullptr && *end != '\0') {
+        if (!isspace(static_cast<unsigned char>(*end))) {
+            return false;
+        }
+        end++;
+    }
+    return true;
+}
+
+bool parseAnchorSlotParam(const String& paramName, char prefix, uint8_t& outSlot)
+{
+    if (paramName.length() != 2 || paramName.charAt(0) != prefix) {
+        return false;
+    }
+    const char slotChar = paramName.charAt(1);
+    if (slotChar < '1' || slotChar > '8') {
+        return false;
+    }
+    outSlot = static_cast<uint8_t>(slotChar - '1');
+    return true;
+}
+
+bool parseAnchorDevIdParam(const String& paramName, uint8_t& outSlot)
+{
+    if (!paramName.startsWith("devId") || paramName.length() != 6) {
+        return false;
+    }
+    const char slotChar = paramName.charAt(5);
+    if (slotChar < '1' || slotChar > '8') {
+        return false;
+    }
+    outSlot = static_cast<uint8_t>(slotChar - '1');
+    return true;
+}
+
+ConfigError validateStoredUwbAnchorConfig(const char* path)
+{
+    File file = LittleFS.open(path, "r");
+    if (!file) {
+        LOG_ERROR("ConfigManager: Failed to open config file for validation: %s", path);
+        return ConfigError::FILE_SYSTEM_ERROR;
+    }
+
+    StoredAnchorConfig anchors[kMaxConfigAnchors] = {};
+    bool tagTdoaMode = false;
+    bool anchorCountPresent = false;
+    uint8_t anchorCount = 0;
+    bool tagAnchorConfigValid = true;
+    bool dynamicAnchorConfigValid = true;
+    uint8_t dynamicAnchorPosEnabled = 0;
+    uint8_t use2DEstimator = 1;
+    uint8_t anchorLayout = 0;
+    float anchorHeight = 0.0f;
+    float anchorPlaneSeparation = 0.0f;
+    bool rtlslinkRuntimeConfigValid = true;
+
+    while (file.available()) {
+        String line = file.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0 || line.startsWith("#")) {
+            continue;
+        }
+
+        const int colonIndex = line.indexOf(':');
+        if (colonIndex == -1) {
+            continue;
+        }
+
+        String key = line.substring(0, colonIndex);
+        String value = line.substring(colonIndex + 1);
+        key.trim();
+        value.trim();
+
+        const int dotIndex = key.indexOf('.');
+        if (dotIndex == -1) {
+            continue;
+        }
+
+        const String group = key.substring(0, dotIndex);
+        if (group != "uwb") {
+            continue;
+        }
+
+        const String paramName = key.substring(dotIndex + 1);
+        if (paramName == "mode") {
+            uint8_t parsed = 0;
+            tagTdoaMode = parseU8Strict(value, parsed)
+                && parsed == static_cast<uint8_t>(UWBMode::TAG_TDOA);
+            continue;
+        }
+
+        if (paramName == "anchorCount") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > kMaxConfigAnchors) {
+                tagAnchorConfigValid = false;
+                continue;
+            }
+            anchorCountPresent = true;
+            anchorCount = parsed;
+            continue;
+        }
+
+        if (paramName == "dynamicAnchorPosEnabled") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > 1) {
+                dynamicAnchorConfigValid = false;
+                continue;
+            }
+            dynamicAnchorPosEnabled = parsed;
+            continue;
+        }
+        if (paramName == "use2DEstimator") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > 1) {
+                dynamicAnchorConfigValid = false;
+                continue;
+            }
+            use2DEstimator = parsed;
+            continue;
+        }
+        if (paramName == "anchorLayout") {
+            uint8_t parsed = 0;
+            if (!parseU8Strict(value, parsed) || parsed > 3) {
+                dynamicAnchorConfigValid = false;
+                continue;
+            }
+            anchorLayout = parsed;
+            continue;
+        }
+        if (paramName == "anchorHeight") {
+            dynamicAnchorConfigValid = parseFiniteFloatStrict(value, &anchorHeight)
+                && dynamicAnchorConfigValid;
+            continue;
+        }
+        if (paramName == "anchorPlaneSeparation") {
+            dynamicAnchorConfigValid = parseFiniteFloatStrict(value, &anchorPlaneSeparation)
+                && dynamicAnchorConfigValid;
+            continue;
+        }
+
+        uint8_t slot = 0;
+        if (parseAnchorDevIdParam(paramName, slot)) {
+            uint8_t devId = 0;
+            if (!parseU8Strict(value, devId) || devId >= kMaxConfigAnchors) {
+                tagAnchorConfigValid = false;
+                continue;
+            }
+            anchors[slot].devIdPresent = true;
+            anchors[slot].devId = devId;
+            continue;
+        }
+
+        if (paramName == "rotationDegrees" || paramName == "originAlt") {
+            rtlslinkRuntimeConfigValid = parseFiniteFloatStrict(value)
+                && rtlslinkRuntimeConfigValid;
+            continue;
+        }
+        if (paramName == "originLat" || paramName == "originLon") {
+            rtlslinkRuntimeConfigValid = parseFiniteDoubleStrict(value)
+                && rtlslinkRuntimeConfigValid;
+            continue;
+        }
+
+        if (parseAnchorSlotParam(paramName, 'x', slot)) {
+            anchors[slot].xPresent = parseFiniteFloatStrict(value);
+            tagAnchorConfigValid = anchors[slot].xPresent && tagAnchorConfigValid;
+            continue;
+        }
+        if (parseAnchorSlotParam(paramName, 'y', slot)) {
+            anchors[slot].yPresent = parseFiniteFloatStrict(value);
+            tagAnchorConfigValid = anchors[slot].yPresent && tagAnchorConfigValid;
+            continue;
+        }
+        if (parseAnchorSlotParam(paramName, 'z', slot)) {
+            anchors[slot].zPresent = parseFiniteFloatStrict(value);
+            tagAnchorConfigValid = anchors[slot].zPresent && tagAnchorConfigValid;
+            continue;
+        }
+    }
+
+    file.close();
+
+    if (!rtlslinkRuntimeConfigValid) {
+        LOG_ERROR("ConfigManager: Config %s has non-finite RTLSLink runtime parameters", path);
+        return ConfigError::INVALID_CONFIG;
+    }
+
+    if (!tagTdoaMode) {
+        return ConfigError::OK;
+    }
+
+    if (dynamicAnchorPosEnabled != 0) {
+        if (!dynamicAnchorConfigValid || anchorLayout > 3 || !std::isfinite(anchorHeight)) {
+            LOG_ERROR("ConfigManager: Config %s has invalid dynamic anchor parameters", path);
+            return ConfigError::INVALID_CONFIG;
+        }
+        if (use2DEstimator == 0
+            && (!std::isfinite(anchorPlaneSeparation) || anchorPlaneSeparation <= 0.0f)) {
+            LOG_ERROR("ConfigManager: Config %s has invalid dynamic 3D anchor plane separation", path);
+            return ConfigError::INVALID_CONFIG;
+        }
+        return ConfigError::OK;
+    }
+
+    if (!tagAnchorConfigValid || !anchorCountPresent || anchorCount == 0) {
+        if (tagAnchorConfigValid) {
+            LOG_ERROR("ConfigManager: Config %s missing positive UWB anchorCount", path);
+        }
+        return ConfigError::INVALID_CONFIG;
+    }
+    if (use2DEstimator != 0 && anchorCount < 4) {
+        LOG_ERROR("ConfigManager: Config %s has too few static anchors for 2D TAG_TDOA", path);
+        return ConfigError::INVALID_CONFIG;
+    }
+    if (use2DEstimator == 0 && anchorCount < 4) {
+        LOG_ERROR("ConfigManager: Config %s has too few static anchors for 3D TAG_TDOA", path);
+        return ConfigError::INVALID_CONFIG;
+    }
+
+    bool seen[kMaxConfigAnchors] = {};
+    for (uint8_t slot = 0; slot < anchorCount; slot++) {
+        const StoredAnchorConfig& anchor = anchors[slot];
+        if (!anchor.devIdPresent || !anchor.xPresent || !anchor.yPresent || !anchor.zPresent) {
+            LOG_ERROR("ConfigManager: Config %s missing geometry for UWB anchor slot %u",
+                      path, static_cast<unsigned int>(slot + 1));
+            return ConfigError::INVALID_CONFIG;
+        }
+        if (anchor.devId >= anchorCount || seen[anchor.devId]) {
+            LOG_ERROR("ConfigManager: Config %s has non-contiguous or duplicate UWB anchor id %u",
+                      path, static_cast<unsigned int>(anchor.devId));
+            return ConfigError::INVALID_CONFIG;
+        }
+        seen[anchor.devId] = true;
+    }
+
+    for (uint8_t id = 0; id < anchorCount; id++) {
+        if (!seen[id]) {
+            LOG_ERROR("ConfigManager: Config %s missing UWB anchor id %u",
+                      path, static_cast<unsigned int>(id));
+            return ConfigError::INVALID_CONFIG;
+        }
+    }
+
+    return ConfigError::OK;
+}
+
+} // namespace
 
 // Static member definitions
 etl::string<ConfigManager::MAX_NAME_LENGTH> ConfigManager::s_ActiveConfig;
@@ -287,22 +616,62 @@ ConfigError ConfigManager::LoadConfigNamed(const char* name) {
         return ConfigError::CONFIG_NOT_FOUND;
     }
 
+    const ConfigError validationResult = validateStoredUwbAnchorConfig(configPath.c_str());
+    if (validationResult != ConfigError::OK) {
+        return validationResult;
+    }
+
+    const etl::string<MAX_NAME_LENGTH> previousActive = s_ActiveConfig;
+    const bool hadParamsFile = LittleFS.exists(kParamsFile);
+    LittleFS.remove(kParamsLoadBackupFile);
+    if (hadParamsFile && !CopyFile(kParamsFile, kParamsLoadBackupFile)) {
+        return ConfigError::FILE_SYSTEM_ERROR;
+    }
+
+    auto restorePreviousParams = [&]() {
+        bool restored = true;
+        if (hadParamsFile) {
+            restored = CopyFile(kParamsLoadBackupFile, kParamsFile);
+        } else {
+            restored = LittleFS.remove(kParamsFile) || !LittleFS.exists(kParamsFile);
+        }
+        LittleFS.remove(kParamsLoadBackupFile);
+        s_ActiveConfig = previousActive;
+        if (!SaveMetadata()) {
+            restored = false;
+        }
+        const ErrorParam restoreResult = Front::LoadAllParams();
+        if (restoreResult != ErrorParam::OK && restoreResult != ErrorParam::FILE_NOT_FOUND) {
+            restored = false;
+        }
+        return restored;
+    };
+
     // Copy config file to params.txt
-    if (!CopyFile(configPath.c_str(), "/params.txt")) {
+    if (!CopyFile(configPath.c_str(), kParamsFile)) {
+        restorePreviousParams();
         return ConfigError::FILE_SYSTEM_ERROR;
     }
 
     // Update active config
     s_ActiveConfig.assign(name);
-    SaveMetadata();
+    if (!SaveMetadata()) {
+        restorePreviousParams();
+        return ConfigError::FILE_SYSTEM_ERROR;
+    }
 
     // Reload all parameters and check for errors
     ErrorParam loadResult = Front::LoadAllParams();
     if (loadResult != ErrorParam::OK && loadResult != ErrorParam::FILE_NOT_FOUND) {
         LOG_WARN("ConfigManager: Failed to reload parameters after loading config");
+        restorePreviousParams();
+        if (loadResult == ErrorParam::INVALID_DATA) {
+            return ConfigError::INVALID_CONFIG;
+        }
         return ConfigError::FILE_SYSTEM_ERROR;
     }
 
+    LittleFS.remove(kParamsLoadBackupFile);
     LOG_INFO("ConfigManager: Loaded config '%s'", name);
     return ConfigError::OK;
 }

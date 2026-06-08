@@ -44,5 +44,6 @@ uwb.rotationDegrees: 312.00000
 uwb.dynamicAnchorPosEnabled: 0
 uwb.anchorLayout: 0
 uwb.anchorHeight: 0.000000
+uwb.anchorPlaneSeparation: 0.000000
 uwb.anchorPosLocked: 0
 uwb.distanceAvgSamples: 50

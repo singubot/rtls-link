@@ -21,7 +21,7 @@ public:
     void Init(uint32_t baudrate, size_t tx_buffer_size);
     void Update();
 
-    void ConfigureAnchors(etl::span<const UWBAnchorParam> anchors, float rotation_degrees);
+    bool ConfigureAnchors(etl::span<const UWBAnchorParam> anchors, float rotation_degrees);
     void SendPosition(float x_m, float y_m, float z_m);
     bool EnqueueTdoa(uint8_t anchor_a,
                      uint8_t anchor_b,
@@ -41,7 +41,7 @@ private:
     static constexpr uint8_t kFrameMagic2 = 0x42; // 'B'
     static constexpr uint8_t kProtocolVersion = 1;
     static constexpr uint8_t kPayloadLenMax = 32;
-    static constexpr uint8_t kMaxAnchors = 6;
+    static constexpr uint8_t kMaxAnchors = UWBParams::maxAnchorCount;
     static constexpr uint32_t kConfigRetryIntervalMs = 500;
     static constexpr uint16_t kMaxTdoaAgeMs = 200;
     static constexpr uint16_t kDefaultPositionErrorMm = 500;
@@ -105,10 +105,10 @@ private:
     void HandleFrame();
     void SendConfig();
     bool SendTdoa(const PendingTdoa& tdoa);
-    void SendFrame(MsgId msg_id, const uint8_t* payload, uint8_t payload_len);
+    bool SendFrame(MsgId msg_id, const uint8_t* payload, uint8_t payload_len, uint8_t* out_seq = nullptr);
     bool TakeTxMutex(TickType_t timeout_ticks);
     void GiveTxMutex();
-    void WriteFrameLocked(MsgId msg_id, const uint8_t* payload, uint8_t payload_len);
+    void WriteFrameLocked(MsgId msg_id, const uint8_t* payload, uint8_t payload_len, uint8_t* out_seq = nullptr);
     bool TdoaPassesPhysicalGuard(uint8_t anchor_a, uint8_t anchor_b, float distance_diff_m);
     bool AnchorBaselineM(uint8_t anchor_a, uint8_t anchor_b, float& baseline_m) const;
     uint16_t ComputeAgeMs(uint64_t solved_us, size_t frame_len) const;
@@ -125,6 +125,9 @@ private:
     etl::array<Anchor, kMaxAnchors> anchors_ = {};
 
     SemaphoreHandle_t tx_mutex_ = nullptr;
+    SemaphoreHandle_t config_mutex_ = nullptr;
+    bool awaiting_config_ack_ = false;
+    uint8_t expected_config_end_seq_ = 0;
     uint32_t dropped_stale_ = 0;
     uint32_t dropped_tx_busy_ = 0;
     uint32_t dropped_tdoa_tx_busy_ = 0;

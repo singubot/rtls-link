@@ -96,26 +96,150 @@ static void estimatorProcess();
 // timestamp check at consume time.
 static constexpr uint8_t kNumAnchors = 8;
 static constexpr uint8_t kNumPairs = (kNumAnchors * (kNumAnchors - 1)) / 2;
+static constexpr uint8_t kDynamicAnchorCount2D = 4;
+static constexpr uint8_t kDynamicAnchorCount3D = 8;
 
 using PairSlot = tdoa::MeasurementSlot;
 
+static constexpr size_t kMin3DMeasurementsForSolve = 5;
+static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 4;
+static constexpr uint64_t kMax3DBatchSpanUs = 120000;
+static constexpr tdoa_estimator::Scalar kMax3DPositionVarianceM2 = 9.0f;
+
+static bool is3DCovarianceAcceptable(const tdoa_estimator::CovMatrix3D& covariance)
+{
+    for (uint8_t axis = 0; axis < 3; axis++) {
+        const tdoa_estimator::Scalar variance = covariance(axis, axis);
+        if (!std::isfinite(static_cast<double>(variance))
+            || variance < 0.0f
+            || variance > kMax3DPositionVarianceM2) {
+            return false;
+        }
+    }
+    return true;
+}
+
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+static uint8_t dynamicAnchorCountForParams(const UWBParams& params)
+{
+    return params.use2DEstimator != 0
+        ? kDynamicAnchorCount2D
+        : kDynamicAnchorCount3D;
+}
+#endif
+
+static uint8_t configuredDynamicAnchorCount()
+{
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+    return dynamicAnchorCountForParams(Front::uwbLittleFSFront.GetParams());
+#else
+    return 0;
+#endif
+}
+
+static bool anchorsAreNonCoplanar3D(etl::span<const UWBAnchorParam> anchors)
+{
+    if (anchors.size() < 4) {
+        return false;
+    }
+
+    const UWBAnchorParam& p0 = anchors[0];
+    auto dist2 = [](const UWBAnchorParam& a, const UWBAnchorParam& b) {
+        const float dx = a.x - b.x;
+        const float dy = a.y - b.y;
+        const float dz = a.z - b.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    size_t i1 = anchors.size();
+    float scale2 = 0.0f;
+    for (size_t i = 1; i < anchors.size(); i++) {
+        scale2 = std::max(scale2, dist2(p0, anchors[i]));
+        if (dist2(p0, anchors[i]) > 1e-6f) {
+            i1 = i;
+            break;
+        }
+    }
+    if (i1 == anchors.size()) {
+        return false;
+    }
+
+    auto vecFromP0 = [&p0](const UWBAnchorParam& p, float& x, float& y, float& z) {
+        x = p.x - p0.x;
+        y = p.y - p0.y;
+        z = p.z - p0.z;
+    };
+
+    float v1x = 0.0f;
+    float v1y = 0.0f;
+    float v1z = 0.0f;
+    vecFromP0(anchors[i1], v1x, v1y, v1z);
+
+    float nx = 0.0f;
+    float ny = 0.0f;
+    float nz = 0.0f;
+    size_t i2 = anchors.size();
+    for (size_t i = 1; i < anchors.size(); i++) {
+        if (i == i1) {
+            continue;
+        }
+        float v2x = 0.0f;
+        float v2y = 0.0f;
+        float v2z = 0.0f;
+        vecFromP0(anchors[i], v2x, v2y, v2z);
+        const float cx = v1y * v2z - v1z * v2y;
+        const float cy = v1z * v2x - v1x * v2z;
+        const float cz = v1x * v2y - v1y * v2x;
+        const float normal2 = cx * cx + cy * cy + cz * cz;
+        scale2 = std::max(scale2, dist2(p0, anchors[i]));
+        if (normal2 > 1e-8f) {
+            nx = cx;
+            ny = cy;
+            nz = cz;
+            i2 = i;
+            break;
+        }
+    }
+    if (i2 == anchors.size()) {
+        return false;
+    }
+
+    const float normalNorm = std::sqrt(nx * nx + ny * ny + nz * nz);
+    const float scale = std::sqrt(std::max(scale2, 1.0f));
+    const float tolerance = std::max(0.01f, scale * 0.001f);
+    for (size_t i = 1; i < anchors.size(); i++) {
+        float vx = 0.0f;
+        float vy = 0.0f;
+        float vz = 0.0f;
+        vecFromP0(anchors[i], vx, vy, vz);
+        const float distanceFromPlane = std::abs(nx * vx + ny * vy + nz * vz) / normalNorm;
+        if (distanceFromPlane > tolerance) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static etl::array<tdoa::MeasurementSlot, kNumPairs> pair_slots = {};
 static SemaphoreHandle_t measurements_mtx = xSemaphoreCreateMutex();
-static etl::array<UWBAnchorParam, 8> anchor_positions;
-static etl::array<bool, 8> configured_anchor_ids = {};
+static etl::array<UWBAnchorParam, kNumAnchors> anchor_positions;
+static etl::array<bool, kNumAnchors> configured_anchor_ids = {};
+static std::atomic<bool> s_estimatorReinitRequested{false};
 
 #if defined(USE_DYNAMIC_ANCHOR_POSITIONS) && defined(USE_RTLSLINK_BEACON_BACKEND)
-static void configureRtlslinkBeaconFromAnchorPositions()
+static bool configureRtlslinkBeaconFromAnchorPositions()
 {
-    etl::array<UWBAnchorParam, 8> dynamic_anchors = {};
+    etl::array<UWBAnchorParam, kDynamicAnchorCount3D> dynamic_anchors = {};
     uint8_t dynamic_anchor_count = 0;
+    const uint8_t expected_dynamic_count = configuredDynamicAnchorCount();
 
     if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
         LOG_WARN("RTLSLink beacon dynamic anchor config skipped - mutex busy");
-        return;
+        return false;
     }
 
-    for (uint8_t id = 0; id < dynamic_anchors.size(); id++) {
+    for (uint8_t id = 0; id < expected_dynamic_count; id++) {
         if (!configured_anchor_ids[id]) {
             continue;
         }
@@ -126,13 +250,22 @@ static void configureRtlslinkBeaconFromAnchorPositions()
 
     if (dynamic_anchor_count == 0) {
         LOG_WARN("RTLSLink beacon dynamic anchor config skipped - no anchors");
-        return;
+        return false;
     }
 
-    App::ConfigureRtlslinkBeaconAnchors(
+    const bool configured = App::ConfigureRtlslinkBeaconAnchors(
         etl::span<const UWBAnchorParam>(dynamic_anchors.data(), dynamic_anchor_count));
-    LOG_INFO("RTLSLink beacon configured from dynamic anchor positions (%u anchors)",
-             static_cast<unsigned int>(dynamic_anchor_count));
+    if (configured) {
+        LOG_INFO("RTLSLink beacon configured from dynamic anchor positions (%u anchors)",
+                 static_cast<unsigned int>(dynamic_anchor_count));
+    }
+    return configured;
+}
+
+static void clearRtlslinkBeaconDynamicAnchors()
+{
+    etl::array<UWBAnchorParam, 1> emptyAnchors = {};
+    App::ConfigureRtlslinkBeaconAnchors(etl::span<const UWBAnchorParam>(emptyAnchors.data(), 0));
 }
 #endif
 
@@ -147,6 +280,82 @@ static TaskHandle_t s_estimator_task_handle = nullptr;
 // decrements as it consumes. Used to gate task notifications without holding
 // the mutex.
 static std::atomic<uint32_t> fresh_pair_count{0};
+
+static void clearFreshMeasurementsLocked()
+{
+    for (auto& slot : pair_slots) {
+        slot.fresh = false;
+    }
+    fresh_pair_count.store(0, std::memory_order_relaxed);
+}
+
+static bool buildStaticAnchorConfig(etl::span<const UWBAnchorParam> anchors,
+                                    etl::array<UWBAnchorParam, kNumAnchors>& next_anchor_positions,
+                                    etl::array<bool, kNumAnchors>& next_configured_anchor_ids,
+                                    uint8_t& configuredOut)
+{
+    uint8_t configured = 0;
+    uint8_t max_anchor_id = 0;
+    for (const auto& anchor : anchors) {
+        uint8_t anchorId = 0;
+        if (!tdoa::ParseAnchorId(anchor.shortAddr, anchorId) || anchorId >= kNumAnchors) {
+            LOG_ERROR("Rejected static anchor config: invalid short address '%c%c' (expected 0-7)",
+                     anchor.shortAddr[0], anchor.shortAddr[1]);
+            return false;
+        }
+        if (next_configured_anchor_ids[anchorId]) {
+            LOG_ERROR("Rejected static anchor config: duplicate anchor id %u",
+                     static_cast<unsigned int>(anchorId));
+            return false;
+        }
+        if (!std::isfinite(anchor.x) || !std::isfinite(anchor.y) || !std::isfinite(anchor.z)) {
+            LOG_ERROR("Rejected static anchor config: non-finite coordinates for anchor id %u",
+                     static_cast<unsigned int>(anchorId));
+            return false;
+        }
+        next_anchor_positions[anchorId] = anchor;
+        next_configured_anchor_ids[anchorId] = true;
+        max_anchor_id = std::max(max_anchor_id, anchorId);
+        configured++;
+    }
+
+    if (configured == 0) {
+        LOG_ERROR("Rejected static anchor config: no anchors configured");
+        return false;
+    }
+
+    const uint8_t required_count = static_cast<uint8_t>(max_anchor_id + 1);
+    bool contiguous = configured == required_count;
+    for (uint8_t id = 0; contiguous && id < required_count; id++) {
+        contiguous = next_configured_anchor_ids[id];
+    }
+    if (!contiguous) {
+        LOG_ERROR("Rejected non-contiguous static anchor ids (configured=%u max=%u)",
+                  static_cast<unsigned int>(configured),
+                  static_cast<unsigned int>(max_anchor_id));
+        return false;
+    }
+
+    configuredOut = configured;
+    return true;
+}
+
+static bool applyStaticAnchorsLocked(etl::span<const UWBAnchorParam> anchors, uint8_t& configuredOut)
+{
+    etl::array<UWBAnchorParam, kNumAnchors> next_anchor_positions = {};
+    etl::array<bool, kNumAnchors> next_configured_anchor_ids = {};
+    if (!buildStaticAnchorConfig(anchors,
+                                 next_anchor_positions,
+                                 next_configured_anchor_ids,
+                                 configuredOut)) {
+        return false;
+    }
+
+    anchor_positions = next_anchor_positions;
+    configured_anchor_ids = next_configured_anchor_ids;
+    clearFreshMeasurementsLocked();
+    return true;
+}
 
 // Last-notify timestamp for debouncing producer-side wakeups.
 static std::atomic<uint32_t> last_notify_ms{0};
@@ -345,6 +554,7 @@ static constexpr uint64_t POSITION_LOG_INTERVAL_MS = 500;  // Log position every
 DynamicAnchorPositionCalculator UWBTagTDoA::s_dynamicCalc;
 bool UWBTagTDoA::s_useDynamicPositions = false;
 uint32_t UWBTagTDoA::s_lastPositionUpdate = 0;
+static SemaphoreHandle_t s_dynamicCalcMutex = nullptr;
 // Coordination flags between dynamic-anchor updates and estimator task
 static std::atomic<bool> s_dynamicPositionsReadyForEstimator{false};
 static std::atomic<bool> s_dynamicEstimatorReinitRequested{false};
@@ -353,6 +563,52 @@ static std::atomic<uint32_t> s_dynamicTransitionHoldoffUntilMs{0};
 // Interval for dynamic position updates (ms)
 static constexpr uint32_t DYNAMIC_POS_UPDATE_INTERVAL_MS = 200;
 static constexpr uint32_t DYNAMIC_REINIT_HOLDOFF_MS = 300;
+
+static bool takeDynamicCalcMutex(TickType_t timeout)
+{
+    if (s_dynamicCalcMutex == nullptr) {
+        s_dynamicCalcMutex = xSemaphoreCreateMutex();
+    }
+    return s_dynamicCalcMutex != nullptr
+        && xSemaphoreTake(s_dynamicCalcMutex, timeout) == pdTRUE;
+}
+
+static void giveDynamicCalcMutex()
+{
+    if (s_dynamicCalcMutex != nullptr) {
+        xSemaphoreGive(s_dynamicCalcMutex);
+    }
+}
+
+void UWBTagTDoA::ClearDynamicAnchorRuntimeState(bool resetCalculator, bool clearLiveAnchors)
+{
+    s_dynamicPositionsReadyForEstimator.store(false, std::memory_order_relaxed);
+    s_dynamicEstimatorReinitRequested.store(false, std::memory_order_relaxed);
+    s_dynamicTransitionHoldoffUntilMs.store(0, std::memory_order_relaxed);
+    s_lastPositionUpdate = 0;
+
+    if (resetCalculator && takeDynamicCalcMutex(pdMS_TO_TICKS(50))) {
+        s_dynamicCalc.reset();
+        giveDynamicCalcMutex();
+    }
+
+    if (clearLiveAnchors
+        && measurements_mtx != nullptr
+        && xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+        for (uint8_t i = 0; i < kNumAnchors; i++) {
+            configured_anchor_ids[i] = false;
+            anchor_positions[i] = {};
+        }
+        clearFreshMeasurementsLocked();
+        xSemaphoreGive(measurements_mtx);
+    }
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+    if (clearLiveAnchors) {
+        clearRtlslinkBeaconDynamicAnchors();
+    }
+#endif
+}
 #endif
 
 // Event-driven (continuous) task — body blocks on xTaskNotifyTake with a
@@ -378,25 +634,21 @@ UWBTagTDoA::UWBTagTDoA(const bsp::UWBConfig& uwb_config, etl::span<const UWBAnch
     vTaskDelay(pdMS_TO_TICKS(300));
     ensureEstimatorStatsMutex();
 
-    configured_anchor_ids.fill(false);
-
-    // Fill in anchor positions lookup table
-    for (uint32_t i = 0; i < anchors.size(); i++) {
-        uint8_t anchorId = 0;
-        if (!tdoa::ParseAnchorId(anchors[i].shortAddr, anchorId)) {
-            LOG_WARN("Ignoring invalid configured anchor short address '%c%c' (expected 0-7)",
-                     anchors[i].shortAddr[0], anchors[i].shortAddr[1]);
-            continue;
-        }
-        anchor_positions[anchorId] = anchors[i];
-        configured_anchor_ids[anchorId] = true;
-    }
-
     // Get UWB radio/settings parameters before deciding which anchor geometry to publish.
     const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
 
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
     s_useDynamicPositions = (uwbParams.dynamicAnchorPosEnabled != 0);
+#endif
+
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+    if (!s_useDynamicPositions) {
+        ApplyStaticAnchors(anchors);
+    } else {
+        LOG_INFO("Dynamic anchor positioning enabled; waiting for calculated geometry");
+    }
+#else
+    ApplyStaticAnchors(anchors);
 #endif
 
 #ifdef USE_RTLSLINK_BEACON_BACKEND
@@ -458,19 +710,29 @@ UWBTagTDoA::UWBTagTDoA(const bsp::UWBConfig& uwb_config, etl::span<const UWBAnch
     if (s_useDynamicPositions) {
         DynamicAnchorConfig dynamicConfig = {
             .layout = uwbParams.anchorLayout,
-            .anchorCount = 4,  // Rectangular layout uses 4 anchors
+            .anchorCount = dynamicAnchorCountForParams(uwbParams),
             .anchorHeight = uwbParams.anchorHeight,
+            .anchorPlaneSeparation = uwbParams.anchorPlaneSeparation,
             .avgSampleCount = uwbParams.distanceAvgSamples,
             .lockedMask = uwbParams.anchorPosLocked
         };
-        s_dynamicCalc.init(dynamicConfig);
+        if (takeDynamicCalcMutex(pdMS_TO_TICKS(50))) {
+            s_dynamicCalc.init(dynamicConfig);
+            giveDynamicCalcMutex();
+        } else {
+            LOG_ERROR("Dynamic anchor calculator init skipped - mutex unavailable");
+        }
         s_lastPositionUpdate = 0;
 
         // Register callback to receive inter-anchor distances
         uwbTdoa2TagSetDistanceCallback(&UWBTagTDoA::onInterAnchorDistance);
 
-        LOG_INFO("Dynamic anchor positioning enabled (layout=%d, height=%.2f, samples=%d)",
-                 uwbParams.anchorLayout, uwbParams.anchorHeight, uwbParams.distanceAvgSamples);
+        LOG_INFO("Dynamic anchor positioning enabled (layout=%d, anchors=%u, height=%.2f, planeSep=%.2f, samples=%d)",
+                 uwbParams.anchorLayout,
+                 static_cast<unsigned int>(dynamicConfig.anchorCount),
+                 uwbParams.anchorHeight,
+                 uwbParams.anchorPlaneSeparation,
+                 uwbParams.distanceAvgSamples);
     }
 #endif
 
@@ -505,6 +767,20 @@ void UWBTagTDoA::Update()
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
     // Periodically update anchor positions from dynamic calculation
     maybeUpdateDynamicPositions();
+#endif
+}
+
+void UWBTagTDoA::SetEnabled(bool enabled)
+{
+    if (enabled) {
+        return;
+    }
+
+    isr_flag = false;
+    m_DwData.interrupt_flags = 0;
+
+#ifdef USE_DYNAMIC_ANCHOR_POSITIONS
+    ClearDynamicAnchorRuntimeState(true, true);
 #endif
 }
 
@@ -592,9 +868,7 @@ static FAST_CODE void estimatorCallback(tdoaMeasurement_t* tdoa)
     }
     if (tdoa->anchorIdA >= kNumAnchors
         || tdoa->anchorIdB >= kNumAnchors
-        || tdoa->anchorIdA == tdoa->anchorIdB
-        || !configured_anchor_ids[tdoa->anchorIdA]
-        || !configured_anchor_ids[tdoa->anchorIdB]) {
+        || tdoa->anchorIdA == tdoa->anchorIdB) {
         return;
     }
 
@@ -618,6 +892,11 @@ static FAST_CODE void estimatorCallback(tdoaMeasurement_t* tdoa)
 #if TDOA_STATS_LOGGING == ENABLE
         stats_producer_dropped.fetch_add(1, std::memory_order_relaxed);
 #endif
+        return;
+    }
+
+    if (!configured_anchor_ids[pair.a] || !configured_anchor_ids[pair.b]) {
+        xSemaphoreGive(measurements_mtx);
         return;
     }
 
@@ -720,6 +999,64 @@ void UWBTagTDoA::ResetEstimatorStats()
     resetEstimatorStats();
 }
 
+bool UWBTagTDoA::ApplyStaticAnchors(etl::span<const UWBAnchorParam> anchors)
+{
+    if (measurements_mtx == nullptr) {
+        return false;
+    }
+
+    if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
+        LOG_WARN("Static anchor config skipped - measurement mutex busy");
+        return false;
+    }
+
+    uint8_t configured = 0;
+    const bool applied = applyStaticAnchorsLocked(anchors, configured);
+    xSemaphoreGive(measurements_mtx);
+
+    if (!applied) {
+        return false;
+    }
+
+    s_estimatorReinitRequested.store(true, std::memory_order_relaxed);
+    LOG_INFO("Static anchor config applied to estimator (%u anchors)",
+             static_cast<unsigned int>(configured));
+    return true;
+}
+
+bool UWBTagTDoA::ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors)
+{
+    etl::array<UWBAnchorParam, kNumAnchors> next_anchor_positions = {};
+    etl::array<bool, kNumAnchors> next_configured_anchor_ids = {};
+    uint8_t configured = 0;
+    return buildStaticAnchorConfig(anchors,
+                                   next_anchor_positions,
+                                   next_configured_anchor_ids,
+                                   configured);
+}
+
+bool UWBTagTDoA::ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorParam> anchors,
+                                                   bool use2DEstimator)
+{
+    if (!ValidateStaticAnchors(anchors)) {
+        return false;
+    }
+    if (use2DEstimator && anchors.size() < 4) {
+        LOG_ERROR("Rejected static anchor config: 2D estimator requires at least 4 anchors");
+        return false;
+    }
+    if (!use2DEstimator && anchors.size() < kMin3DUniqueAnchorsForSolve) {
+        LOG_ERROR("Rejected static anchor config: 3D estimator requires at least %u anchors",
+                  static_cast<unsigned int>(kMin3DUniqueAnchorsForSolve));
+        return false;
+    }
+    if (!use2DEstimator && !anchorsAreNonCoplanar3D(anchors)) {
+        LOG_ERROR("Rejected static anchor config: 3D estimator requires non-coplanar anchors");
+        return false;
+    }
+    return true;
+}
+
 #ifdef ESP32S3_UWB_BOARD
 void UWBTagTDoA::ApplyMatcherPolicy(uint8_t policy)
 {
@@ -784,8 +1121,8 @@ static void estimatorProcess() {
     static bool first_estimation = true;
     static bool last_use_2d = true;
     static constexpr tdoa_estimator::Scalar ASSUMED_TAG_Z = 0.0f;
-    static constexpr int NUM_ITERATIONS = 5;
-    static constexpr size_t MIN_MEASUREMENTS = kMinMeasurementsForNotify;
+    static constexpr int NUM_ITERATIONS_2D = 5;
+    static constexpr int NUM_ITERATIONS_3D = 10;
 
     // Continuous task — block on notification until producer wakes us, or
     // until the watchdog timeout elapses (so dynamic-anchor / stats
@@ -793,11 +1130,19 @@ static void estimatorProcess() {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kEstimatorWatchdogMs));
 
     const bool USE_2D_ESTIMATOR = (Front::uwbLittleFSFront.GetParams().use2DEstimator != 0);
+    const size_t min_measurements = USE_2D_ESTIMATOR
+        ? kMinMeasurementsForNotify
+        : kMin3DMeasurementsForSolve;
     if (USE_2D_ESTIMATOR != last_use_2d) {
         first_estimation = true;
         last_use_2d = USE_2D_ESTIMATOR;
         LOG_INFO("Estimator mode changed to %s - resetting warm-start",
                  USE_2D_ESTIMATOR ? "2D" : "3D");
+    }
+
+    if (s_estimatorReinitRequested.exchange(false, std::memory_order_relaxed)) {
+        first_estimation = true;
+        LOG_INFO("Reinitializing estimator from static anchor config");
     }
 
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
@@ -839,9 +1184,11 @@ static void estimatorProcess() {
                                              configured_anchor_ids,
                                              now_us,
                                              kStaleThresholdUs,
-                                             MIN_MEASUREMENTS,
+                                             min_measurements,
                                              snapshot,
-                                             kNumPairs);
+                                             kNumPairs,
+                                             USE_2D_ESTIMATOR ? 0 : kMin3DUniqueAnchorsForSolve,
+                                             USE_2D_ESTIMATOR ? 0 : kMax3DBatchSpanUs);
 
         have_enough = snapshotResult.haveEnough;
         copy_count = snapshotResult.copied;
@@ -955,7 +1302,7 @@ static void estimatorProcess() {
                 tdoas,
                 initial_guess_2d,
                 fixed_z_for_estimation,
-                NUM_ITERATIONS,
+                NUM_ITERATIONS_2D,
                 1e-3f,  // convergenceThreshold
                 rmseThreshold
             );
@@ -970,7 +1317,7 @@ static void estimatorProcess() {
 #endif
             solver_iterations = result.iterations;
 
-            if (result.valid) {
+            if (result.valid && result.converged) {
                 // Update only X and Y components of the 3D state vector
                 current_estimate_3d.head<2>() = result.position;
                 // Z component remains unchanged from the previous state in 2D mode
@@ -1000,7 +1347,7 @@ static void estimatorProcess() {
                 anchors_right,
                 tdoas,
                 initial_guess_3d,
-                NUM_ITERATIONS,
+                NUM_ITERATIONS_3D,
                 1e-3f,  // convergenceThreshold
                 rmseThreshold
             );
@@ -1015,7 +1362,10 @@ static void estimatorProcess() {
 #endif
             solver_iterations = result.iterations;
 
-            if (result.valid) {
+            if (result.valid
+                && result.converged
+                && result.covarianceValid
+                && is3DCovarianceAcceptable(result.positionCovariance)) {
                 // Update the full 3D state vector
                 current_estimate_3d = result.position;
                 is_valid_estimate = true;
@@ -1114,10 +1464,101 @@ bool UWBTagTDoA::IsDynamicPositioningEnabled() {
     return s_useDynamicPositions;
 }
 
-bool UWBTagTDoA::AreDynamicAnchorPositionsReady() {
-    return s_useDynamicPositions &&
-           s_dynamicPositionsReadyForEstimator.load(std::memory_order_relaxed);
+bool UWBTagTDoA::AreDynamicPositionsReadyForEstimator() {
+    return s_useDynamicPositions
+        && s_dynamicPositionsReadyForEstimator.load(std::memory_order_relaxed);
 }
+
+bool UWBTagTDoA::AreDynamicAnchorPositionsReady() {
+    return AreDynamicPositionsReadyForEstimator();
+}
+
+void UWBTagTDoA::ApplyDynamicAnchorPositioningEnabled(uint8_t enabled) {
+    const bool should_enable = enabled != 0;
+    if (!should_enable) {
+        if (s_useDynamicPositions) {
+            LOG_INFO("Dynamic anchor positioning disabled at runtime");
+        }
+        s_useDynamicPositions = false;
+        uwbTdoa2TagSetDistanceCallback(nullptr);
+        ClearDynamicAnchorRuntimeState(true, false);
+        return;
+    }
+
+    if (!s_useDynamicPositions) {
+        s_useDynamicPositions = true;
+        ClearDynamicAnchorRuntimeState(true, true);
+        ApplyDynamicAnchorRuntimeConfig(Front::uwbLittleFSFront.GetParams());
+        uwbTdoa2TagSetDistanceCallback(&UWBTagTDoA::onInterAnchorDistance);
+        LOG_INFO("Dynamic anchor positioning enabled at runtime; waiting for calculated geometry");
+    }
+}
+
+void UWBTagTDoA::ApplyDynamicAnchorRuntimeConfig(const UWBParams& params) {
+    if (!s_useDynamicPositions) {
+        if (params.dynamicAnchorPosEnabled != 0) {
+            LOG_WARN("Dynamic anchor runtime config skipped because dynamic positioning is not active");
+        }
+        return;
+    }
+
+    DynamicAnchorConfig dynamicConfig = {
+        .layout = params.anchorLayout,
+        .anchorCount = dynamicAnchorCountForParams(params),
+        .anchorHeight = params.anchorHeight,
+        .anchorPlaneSeparation = params.anchorPlaneSeparation,
+        .avgSampleCount = params.distanceAvgSamples,
+        .lockedMask = params.anchorPosLocked
+    };
+    if (!takeDynamicCalcMutex(pdMS_TO_TICKS(50))) {
+        LOG_ERROR("Dynamic anchor runtime config skipped - calculator mutex unavailable");
+        return;
+    }
+    s_dynamicCalc.init(dynamicConfig);
+    giveDynamicCalcMutex();
+    s_lastPositionUpdate = 0;
+    s_dynamicPositionsReadyForEstimator.store(false, std::memory_order_relaxed);
+    s_dynamicEstimatorReinitRequested.store(false, std::memory_order_relaxed);
+    s_dynamicTransitionHoldoffUntilMs.store(0, std::memory_order_relaxed);
+
+    if (measurements_mtx != nullptr
+        && xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+        for (uint8_t i = 0; i < kNumAnchors; i++) {
+            configured_anchor_ids[i] = false;
+            anchor_positions[i] = {};
+        }
+        clearFreshMeasurementsLocked();
+        xSemaphoreGive(measurements_mtx);
+    }
+
+    LOG_INFO("Dynamic anchor runtime config applied (layout=%d, anchors=%u, height=%.2f, planeSep=%.2f, samples=%d)",
+             params.anchorLayout,
+             static_cast<unsigned int>(dynamicConfig.anchorCount),
+             params.anchorHeight,
+             params.anchorPlaneSeparation,
+             params.distanceAvgSamples);
+}
+
+void UWBTagTDoA::ApplyDynamicAnchorLockMask(uint8_t lockedMask) {
+    if (!s_useDynamicPositions) {
+        return;
+    }
+
+    if (!takeDynamicCalcMutex(pdMS_TO_TICKS(50))) {
+        LOG_ERROR("Dynamic anchor lock mask skipped - calculator mutex unavailable");
+        return;
+    }
+    s_dynamicCalc.setLockedMask(lockedMask);
+    giveDynamicCalcMutex();
+
+    LOG_INFO("Dynamic anchor lock mask applied (mask=0x%02X)", lockedMask);
+}
+
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+bool UWBTagTDoA::ConfigureRtlslinkBeaconFromCurrentAnchors() {
+    return configureRtlslinkBeaconFromAnchorPositions();
+}
+#endif
 
 uint8_t UWBTagTDoA::GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8_t maxCount) {
     if (!AreDynamicAnchorPositionsReady() || out == nullptr || maxCount == 0) {
@@ -1129,9 +1570,12 @@ uint8_t UWBTagTDoA::GetDynamicAnchorPositions(DynamicAnchorTelemetry* out, uint8
         return 0;  // Mutex unavailable, skip this update
     }
 
-    // Copy positions from anchor_positions array
     uint8_t count = 0;
-    for (uint8_t i = 0; i < 4 && count < maxCount; i++) {
+    const uint8_t expected_dynamic_count = configuredDynamicAnchorCount();
+    for (uint8_t i = 0; i < expected_dynamic_count && count < maxCount; i++) {
+        if (!configured_anchor_ids[i]) {
+            continue;
+        }
         out[count].id = i;
         out[count].x = anchor_positions[i].x;
         out[count].y = anchor_positions[i].y;
@@ -1162,8 +1606,11 @@ void UWBTagTDoA::onInterAnchorDistance(uint8_t fromAnchor, uint8_t toAnchor, uin
     // Convert corrected DW1000 timestamp units to meters
     float distanceMeters = static_cast<float>(corrected) * DW1000_TIME_TO_METERS;
 
-    // Update the calculator with the corrected distance measurement
-    s_dynamicCalc.updateDistance(fromAnchor, toAnchor, distanceMeters);
+    // Update the calculator with the corrected distance measurement.
+    if (takeDynamicCalcMutex(pdMS_TO_TICKS(2))) {
+        s_dynamicCalc.updateDistance(fromAnchor, toAnchor, distanceMeters);
+        giveDynamicCalcMutex();
+    }
 }
 
 void UWBTagTDoA::maybeUpdateDynamicPositions() {
@@ -1177,33 +1624,60 @@ void UWBTagTDoA::maybeUpdateDynamicPositions() {
         return;
     }
 
-    // Check if we have enough data to calculate positions
-    if (!s_dynamicCalc.canCalculate()) {
+    const uint8_t dynamic_anchor_count = configuredDynamicAnchorCount();
+
+    point_t newPositions[kDynamicAnchorCount3D];
+    bool calculated = false;
+    if (takeDynamicCalcMutex(pdMS_TO_TICKS(10))) {
+        if (s_dynamicCalc.canCalculate()) {
+            calculated = s_dynamicCalc.calculatePositions(newPositions, dynamic_anchor_count);
+        }
+        giveDynamicCalcMutex();
+    }
+    if (!calculated) {
+        if (s_dynamicPositionsReadyForEstimator.exchange(false, std::memory_order_relaxed)) {
+            if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+                for (uint8_t i = 0; i < kNumAnchors; i++) {
+                    configured_anchor_ids[i] = false;
+                    anchor_positions[i] = {};
+                }
+                clearFreshMeasurementsLocked();
+                xSemaphoreGive(measurements_mtx);
+            }
+            s_dynamicEstimatorReinitRequested.store(false, std::memory_order_relaxed);
+            s_dynamicTransitionHoldoffUntilMs.store(0, std::memory_order_relaxed);
+#ifdef USE_RTLSLINK_BEACON_BACKEND
+            clearRtlslinkBeaconDynamicAnchors();
+#endif
+            LOG_WARN("Dynamic anchor positions no longer valid; estimator waiting for fresh geometry");
+        }
         return;
     }
 
-    // Calculate new positions
-    point_t newPositions[4];
-    if (s_dynamicCalc.calculatePositions(newPositions, 4)) {
+    {
         bool updated_positions = false;
         bool first_dynamic_update = false;
 
         // CRITICAL: Lock mutex before updating shared anchor_positions
         // This prevents race conditions with estimatorProcess() which reads these values
         if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
-            for (int i = 0; i < 4; i++) {
+            for (uint8_t i = 0; i < dynamic_anchor_count; i++) {
+                anchor_positions[i].shortAddr[0] = static_cast<char>('0' + i);
+                anchor_positions[i].shortAddr[1] = '\0';
                 anchor_positions[i].x = newPositions[i].x;
                 anchor_positions[i].y = newPositions[i].y;
                 anchor_positions[i].z = newPositions[i].z;
+                configured_anchor_ids[i] = true;
+            }
+            for (uint8_t i = dynamic_anchor_count; i < kNumAnchors; i++) {
+                configured_anchor_ids[i] = false;
+                anchor_positions[i] = {};
             }
 
             if (!s_dynamicPositionsReadyForEstimator.load(std::memory_order_relaxed)) {
                 // Drop pre-transition measurements so the next solve uses only
                 // measurements gathered after dynamic geometry is active.
-                for (auto& slot : pair_slots) {
-                    slot.fresh = false;
-                }
-                fresh_pair_count.store(0, std::memory_order_relaxed);
+                clearFreshMeasurementsLocked();
                 first_dynamic_update = true;
             }
 
@@ -1232,11 +1706,16 @@ void UWBTagTDoA::maybeUpdateDynamicPositions() {
         // Log the updated positions periodically
         static uint32_t lastLogTime = 0;
         if ((now - lastLogTime) >= 2000) {  // Log every 2 seconds
-            LOG_DEBUG("Dynamic Anchors: A0(%.2f,%.2f) A1(%.2f,%.2f) A2(%.2f,%.2f) A3(%.2f,%.2f)",
+            LOG_DEBUG("Dynamic Anchors: count=%u A0(%.2f,%.2f,%.2f) A1(%.2f,%.2f,%.2f) A2(%.2f,%.2f,%.2f) A3(%.2f,%.2f,%.2f)",
+                      static_cast<unsigned int>(dynamic_anchor_count),
                       anchor_positions[0].x, anchor_positions[0].y,
+                      anchor_positions[0].z,
                       anchor_positions[1].x, anchor_positions[1].y,
+                      anchor_positions[1].z,
                       anchor_positions[2].x, anchor_positions[2].y,
-                      anchor_positions[3].x, anchor_positions[3].y);
+                      anchor_positions[2].z,
+                      anchor_positions[3].x, anchor_positions[3].y,
+                      anchor_positions[3].z);
             lastLogTime = now;
         }
     }

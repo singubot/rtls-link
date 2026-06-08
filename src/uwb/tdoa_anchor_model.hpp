@@ -47,8 +47,8 @@ public:
     void AppendBinaryStatus(rtls::protocol::BinaryFrameBuilder<2048>& outFrame, uint8_t view) const;
 
 private:
-    static constexpr uint8_t kAnchorCount = 4;
-    static constexpr uint8_t kPairCount = 6;
+    static constexpr uint8_t kAnchorCount = UWBParams::maxAnchorCount;
+    static constexpr uint8_t kPairCount = (kAnchorCount * (kAnchorCount - 1)) / 2;
     static constexpr uint16_t kMaxSamplesPerPair = 160;
 
     struct PairState {
@@ -73,6 +73,9 @@ private:
     };
 
     static bool FindPair(uint8_t a, uint8_t b, uint8_t& index, bool& reversed);
+    static bool PairActive(const PairState& pair, uint8_t activeAnchorCount);
+    static uint8_t ActiveAnchorCountForParams(const UWBParams& params);
+    static uint8_t ActivePairCountForAnchorCount(uint8_t activeAnchorCount);
     static uint16_t DomainValue(Domain domain, uint16_t rawDistanceTimestampUnits, uint16_t fromAntennaDelay, uint16_t toAntennaDelay);
     static uint16_t RobustEstimate(const uint16_t* samples, uint16_t count, uint16_t& outMad);
     static const char* ModeName(Mode mode);
@@ -80,12 +83,15 @@ private:
 
     void ClearSamplesLocked();
     void ResetHealthLocked();
+    void ClearLockedModelLocked(const char* reason);
+    void SetActiveAnchorCountLocked(uint8_t activeAnchorCount);
     bool LockLocked(const UWBParams& params);
     bool LoadPersistedModelLocked();
     bool PersistModelLocked() const;
     void ClearPersistedModelLocked();
     bool HasLockedModelLocked() const;
     uint8_t HealthyLockedPairCountLocked() const;
+    uint8_t ActivePairCountLocked() const;
     bool EnsureSampleStorageLocked();
     uint16_t* SamplesForPairLocked(uint8_t pairIndex) const;
     void AppendPairJson(String& out, const PairState& pair, bool includeSamples) const;
@@ -97,6 +103,8 @@ private:
     uint32_t m_collectStartMs = 0;
     uint32_t m_collectFirstSampleMs = 0;
     uint16_t m_minSamplesPerPair = 20;
+    uint8_t m_activeAnchorCount = 4;
+    uint8_t m_modelAnchorCount = 0;
     Domain m_domain = DOMAIN_RAW_EFFECTIVE;
     bool m_modelLocked = false;
     bool m_fallbackActive = false;

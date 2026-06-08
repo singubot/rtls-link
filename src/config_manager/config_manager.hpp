@@ -18,6 +18,7 @@ enum class ConfigError {
     NAME_TOO_LONG,
     MAX_CONFIGS_REACHED,
     INVALID_NAME,
+    INVALID_CONFIG,
     CANNOT_DELETE_ACTIVE
 };
 

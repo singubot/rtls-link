@@ -19,13 +19,18 @@
 namespace {
 constexpr const char* kPersistedModelPath = "/tdoa_anchor_model.bin";
 constexpr uint32_t kPersistedModelMagic = 0x414F4454; // TDOA, little-endian.
-constexpr uint16_t kPersistedModelSchema = 1;
-constexpr uint8_t kPersistedModelPairCount = 6;
+constexpr uint16_t kPersistedModelSchema = 2;
+constexpr uint8_t kPersistedModelAnchorCount = UWBParams::maxAnchorCount;
+constexpr uint8_t kPersistedModelPairCount =
+    (kPersistedModelAnchorCount * (kPersistedModelAnchorCount - 1)) / 2;
+static_assert(kPersistedModelAnchorCount == 8, "TDoA anchor model storage expects 8 anchors");
+static_assert(kPersistedModelPairCount == 28, "TDoA anchor model storage expects 28 pairs");
 
 struct PersistedAnchorModel {
     uint32_t magic = kPersistedModelMagic;
     uint16_t schema = kPersistedModelSchema;
     uint8_t domain = 0;
+    uint8_t anchorCount = 0;
     uint8_t pairCount = 0;
     uint32_t modelVersion = 0;
     uint16_t lockedTof[kPersistedModelPairCount] = {};
@@ -71,6 +76,7 @@ void TDoAAnchorModel::Configure(const UWBParams& params)
         : MODE_OFF;
     m_collectWindowMs = params.tdoaAnchorModelCollectWindowMs == 0 ? 10000 : params.tdoaAnchorModelCollectWindowMs;
     m_minSamplesPerPair = params.tdoaAnchorModelMinSamplesPerPair == 0 ? 20 : params.tdoaAnchorModelMinSamplesPerPair;
+    SetActiveAnchorCountLocked(ActiveAnchorCountForParams(params));
 
     if (params.tdoaAnchorModelStartupCollect != 0 && params.tdoaAnchorModelMode != MODE_OFF) {
         if (EnsureSampleStorageLocked()) {
@@ -105,6 +111,7 @@ void TDoAAnchorModel::Reset()
     m_modelLocked = false;
     m_fallbackActive = false;
     m_modelPersisted = false;
+    m_modelAnchorCount = 0;
     m_modelVersion++;
     m_lastError[0] = '\0';
     for (auto& pair : m_pairs) {
@@ -131,6 +138,7 @@ bool TDoAAnchorModel::StartCollection(const UWBParams& params)
         : MODE_OFF;
     m_collectWindowMs = params.tdoaAnchorModelCollectWindowMs == 0 ? 10000 : params.tdoaAnchorModelCollectWindowMs;
     m_minSamplesPerPair = params.tdoaAnchorModelMinSamplesPerPair == 0 ? 20 : params.tdoaAnchorModelMinSamplesPerPair;
+    SetActiveAnchorCountLocked(ActiveAnchorCountForParams(params));
     if (!EnsureSampleStorageLocked()) {
         m_collectState = COLLECT_FAILED;
         std::strncpy(m_lastError, "sample allocation failed", sizeof(m_lastError) - 1);
@@ -141,6 +149,7 @@ bool TDoAAnchorModel::StartCollection(const UWBParams& params)
     ResetHealthLocked();
     m_modelLocked = false;
     m_modelPersisted = false;
+    m_modelAnchorCount = 0;
     m_collectState = COLLECT_ACTIVE;
     m_collectStartMs = 0;
     m_collectFirstSampleMs = 0;
@@ -184,6 +193,10 @@ bool TDoAAnchorModel::ProcessInterAnchorTof(uint8_t fromAnchor,
     if (!FindPair(fromAnchor, toAnchor, pairIndex, reversed)) {
         return false;
     }
+    const uint8_t activeAnchorCount = ActiveAnchorCountForParams(params);
+    if (fromAnchor >= activeAnchorCount || toAnchor >= activeAnchorCount) {
+        return false;
+    }
 
     const Mode mode = (params.tdoaAnchorModelMode <= MODE_LOCKED_ANCHOR_MODEL)
         ? static_cast<Mode>(params.tdoaAnchorModelMode)
@@ -202,6 +215,7 @@ bool TDoAAnchorModel::ProcessInterAnchorTof(uint8_t fromAnchor,
     PairState& pair = m_pairs[pairIndex];
     m_domain = domain;
     m_mode = mode;
+    SetActiveAnchorCountLocked(activeAnchorCount);
 
     if (m_collectState == COLLECT_ACTIVE) {
         const uint32_t now = millis();
@@ -260,8 +274,8 @@ bool TDoAAnchorModel::ProcessInterAnchorTof(uint8_t fromAnchor,
     }
 
     const uint8_t requestedHealthQuorum = params.tdoaAnchorModelHealthQuorum == 0 ? 5 : params.tdoaAnchorModelHealthQuorum;
-    const uint8_t healthQuorum = std::min<uint8_t>(requestedHealthQuorum, kPairCount);
-    m_fallbackActive = mode == MODE_LOCKED_ANCHOR_MODEL && (!m_modelLocked || HealthyLockedPairCountLocked() < healthQuorum);
+    const uint8_t healthQuorum = std::min<uint8_t>(requestedHealthQuorum, ActivePairCountLocked());
+    m_fallbackActive = mode == MODE_LOCKED_ANCHOR_MODEL && (!HasLockedModelLocked() || HealthyLockedPairCountLocked() < healthQuorum);
     xSemaphoreGive(m_mutex);
 
     (void)reversed;
@@ -271,7 +285,7 @@ bool TDoAAnchorModel::ProcessInterAnchorTof(uint8_t fromAnchor,
 String TDoAAnchorModel::StatusJson() const
 {
     String out;
-    out.reserve(900);
+    out.reserve(3200);
 
     if (xSemaphoreTake(m_mutex, portMAX_DELAY) != pdTRUE) {
         return "{\"error\":\"anchor model mutex unavailable\"}";
@@ -285,6 +299,8 @@ String TDoAAnchorModel::StatusJson() const
     out += DomainName(m_domain);
     out += "\",\"version\":";
     out += String(m_modelVersion);
+    out += ",\"activeAnchors\":";
+    out += String(static_cast<unsigned int>(m_activeAnchorCount));
     out += ",\"persisted\":";
     out += (m_modelPersisted ? "true" : "false");
     out += ",\"collectState\":";
@@ -296,8 +312,13 @@ String TDoAAnchorModel::StatusJson() const
     out += ",\"lastError\":\"";
     out += m_lastError;
     out += "\",\"pairs\":[";
+    bool firstPair = true;
     for (uint8_t i = 0; i < kPairCount; i++) {
-        if (i > 0) out += ",";
+        if (!PairActive(m_pairs[i], m_activeAnchorCount)) {
+            continue;
+        }
+        if (!firstPair) out += ",";
+        firstPair = false;
         AppendPairJson(out, m_pairs[i], false);
     }
     out += "]}";
@@ -309,7 +330,7 @@ String TDoAAnchorModel::StatusJson() const
 String TDoAAnchorModel::ExportJson() const
 {
     String out;
-    out.reserve(700);
+    out.reserve(3000);
 
     if (xSemaphoreTake(m_mutex, portMAX_DELAY) != pdTRUE) {
         return "{\"error\":\"anchor model mutex unavailable\"}";
@@ -317,6 +338,8 @@ String TDoAAnchorModel::ExportJson() const
 
     out = "{\"version\":";
     out += String(m_modelVersion);
+    out += ",\"activeAnchors\":";
+    out += String(static_cast<unsigned int>(m_activeAnchorCount));
     out += ",\"persisted\":";
     out += (m_modelPersisted ? "true" : "false");
     out += ",\"domain\":\"";
@@ -324,8 +347,13 @@ String TDoAAnchorModel::ExportJson() const
     out += "\",\"locked\":";
     out += (m_modelLocked ? "true" : "false");
     out += ",\"pairs\":[";
+    bool firstPair = true;
     for (uint8_t i = 0; i < kPairCount; i++) {
-        if (i > 0) out += ",";
+        if (!PairActive(m_pairs[i], m_activeAnchorCount)) {
+            continue;
+        }
+        if (!firstPair) out += ",";
+        firstPair = false;
         AppendPairJson(out, m_pairs[i], false);
     }
     out += "]}";
@@ -337,7 +365,7 @@ String TDoAAnchorModel::ExportJson() const
 String TDoAAnchorModel::CollectStatusJson() const
 {
     String out;
-    out.reserve(700);
+    out.reserve(3000);
 
     if (xSemaphoreTake(m_mutex, portMAX_DELAY) != pdTRUE) {
         return "{\"error\":\"anchor model mutex unavailable\"}";
@@ -356,11 +384,18 @@ String TDoAAnchorModel::CollectStatusJson() const
     out += String(m_collectWindowMs);
     out += ",\"minSamplesPerPair\":";
     out += String(static_cast<unsigned int>(m_minSamplesPerPair));
+    out += ",\"activeAnchors\":";
+    out += String(static_cast<unsigned int>(m_activeAnchorCount));
     out += ",\"domain\":\"";
     out += DomainName(m_domain);
     out += "\",\"pairs\":[";
+    bool firstPair = true;
     for (uint8_t i = 0; i < kPairCount; i++) {
-        if (i > 0) out += ",";
+        if (!PairActive(m_pairs[i], m_activeAnchorCount)) {
+            continue;
+        }
+        if (!firstPair) out += ",";
+        firstPair = false;
         AppendPairJson(out, m_pairs[i], false);
     }
     out += "]}";
@@ -411,10 +446,13 @@ void TDoAAnchorModel::AppendBinaryStatus(rtls::protocol::BinaryFrameBuilder<2048
     outFrame.AppendU16(m_minSamplesPerPair);
     outFrame.AppendU8(HealthyLockedPairCountLocked());
     outFrame.AppendString(m_lastError);
-    outFrame.AppendU8(kPairCount);
+    outFrame.AppendU8(ActivePairCountLocked());
 
     for (uint8_t i = 0; i < kPairCount; i++) {
         const PairState& pair = m_pairs[i];
+        if (!PairActive(pair, m_activeAnchorCount)) {
+            continue;
+        }
         uint8_t pairFlags = 0;
         if (pair.locked) pairFlags |= (1 << 0);
         if (pair.healthy) pairFlags |= (1 << 1);
@@ -448,6 +486,27 @@ bool TDoAAnchorModel::FindPair(uint8_t a, uint8_t b, uint8_t& index, bool& rever
     }
     index = pairIndex;
     return true;
+}
+
+bool TDoAAnchorModel::PairActive(const PairState& pair, uint8_t activeAnchorCount)
+{
+    return pair.a < activeAnchorCount && pair.b < activeAnchorCount;
+}
+
+uint8_t TDoAAnchorModel::ActiveAnchorCountForParams(const UWBParams& params)
+{
+    if (params.dynamicAnchorPosEnabled != 0) {
+        return params.use2DEstimator != 0 ? 4 : kAnchorCount;
+    }
+    if (params.anchorCount >= 4 && params.anchorCount <= kAnchorCount) {
+        return params.anchorCount;
+    }
+    return params.use2DEstimator != 0 ? 4 : kAnchorCount;
+}
+
+uint8_t TDoAAnchorModel::ActivePairCountForAnchorCount(uint8_t activeAnchorCount)
+{
+    return tdoa::PairCount(activeAnchorCount);
 }
 
 uint16_t TDoAAnchorModel::DomainValue(Domain domain, uint16_t rawDistanceTimestampUnits, uint16_t fromAntennaDelay, uint16_t toAntennaDelay)
@@ -535,35 +594,71 @@ void TDoAAnchorModel::ResetHealthLocked()
     }
 }
 
+void TDoAAnchorModel::ClearLockedModelLocked(const char* reason)
+{
+    m_modelLocked = false;
+    m_modelPersisted = false;
+    m_fallbackActive = false;
+    m_modelAnchorCount = 0;
+    for (auto& pair : m_pairs) {
+        pair.locked = false;
+        pair.lockedTof = 0;
+        pair.mad = 0;
+    }
+    if (reason != nullptr) {
+        std::strncpy(m_lastError, reason, sizeof(m_lastError) - 1);
+        m_lastError[sizeof(m_lastError) - 1] = '\0';
+    }
+}
+
+void TDoAAnchorModel::SetActiveAnchorCountLocked(uint8_t activeAnchorCount)
+{
+    if (activeAnchorCount < 4 || activeAnchorCount > kAnchorCount) {
+        activeAnchorCount = 4;
+    }
+    if (m_activeAnchorCount == activeAnchorCount) {
+        return;
+    }
+    m_activeAnchorCount = activeAnchorCount;
+    if (m_modelLocked || m_modelPersisted) {
+        ClearLockedModelLocked("active anchor count changed");
+    }
+}
+
 bool TDoAAnchorModel::LockLocked(const UWBParams& params)
 {
     m_minSamplesPerPair = params.tdoaAnchorModelMinSamplesPerPair == 0 ? 20 : params.tdoaAnchorModelMinSamplesPerPair;
+    SetActiveAnchorCountLocked(ActiveAnchorCountForParams(params));
 
     for (const auto& pair : m_pairs) {
+        if (!PairActive(pair, m_activeAnchorCount)) {
+            continue;
+        }
         if (pair.sampleCount < m_minSamplesPerPair) {
             std::snprintf(m_lastError, sizeof(m_lastError), "pair %u%u has %u samples",
                           pair.a, pair.b, static_cast<unsigned int>(pair.sampleCount));
-            m_modelLocked = false;
-            m_modelPersisted = false;
+            ClearLockedModelLocked(m_lastError);
             return false;
         }
     }
 
     for (auto& pair : m_pairs) {
+        if (!PairActive(pair, m_activeAnchorCount)) {
+            pair.locked = false;
+            pair.lockedTof = 0;
+            pair.mad = 0;
+            continue;
+        }
         uint8_t pairIndex = 0;
         bool reversed = false;
         if (!FindPair(pair.a, pair.b, pairIndex, reversed)) {
-            m_modelLocked = false;
-            m_modelPersisted = false;
-            std::strncpy(m_lastError, "invalid pair table", sizeof(m_lastError) - 1);
+            ClearLockedModelLocked("invalid pair table");
             return false;
         }
 
         const uint16_t* pairSamples = SamplesForPairLocked(pairIndex);
         if (pairSamples == nullptr) {
-            m_modelLocked = false;
-            m_modelPersisted = false;
-            std::strncpy(m_lastError, "sample allocation missing", sizeof(m_lastError) - 1);
+            ClearLockedModelLocked("sample allocation missing");
             return false;
         }
 
@@ -573,6 +668,7 @@ bool TDoAAnchorModel::LockLocked(const UWBParams& params)
 
     ResetHealthLocked();
     m_modelLocked = true;
+    m_modelAnchorCount = m_activeAnchorCount;
     m_fallbackActive = false;
     m_collectState = COLLECT_DONE;
     m_modelVersion++;
@@ -599,7 +695,8 @@ bool TDoAAnchorModel::LoadPersistedModelLocked()
     if (bytesRead != sizeof(stored)
         || stored.magic != kPersistedModelMagic
         || stored.schema != kPersistedModelSchema
-        || stored.pairCount != kPairCount
+        || stored.anchorCount != m_activeAnchorCount
+        || stored.pairCount != ActivePairCountLocked()
         || stored.domain > DOMAIN_PROPAGATION
         || stored.checksum != ModelChecksum(stored)) {
         m_modelPersisted = false;
@@ -615,6 +712,12 @@ bool TDoAAnchorModel::LoadPersistedModelLocked()
     }
 
     for (uint8_t i = 0; i < kPairCount; i++) {
+        if (!PairActive(m_pairs[i], m_activeAnchorCount)) {
+            m_pairs[i].lockedTof = 0;
+            m_pairs[i].mad = 0;
+            m_pairs[i].locked = false;
+            continue;
+        }
         m_pairs[i].lockedTof = stored.lockedTof[i];
         m_pairs[i].mad = stored.mad[i];
         m_pairs[i].locked = true;
@@ -622,6 +725,7 @@ bool TDoAAnchorModel::LoadPersistedModelLocked()
 
     ResetHealthLocked();
     m_modelLocked = true;
+    m_modelAnchorCount = m_activeAnchorCount;
     m_fallbackActive = false;
     m_collectState = COLLECT_DONE;
     m_modelVersion = stored.modelVersion;
@@ -638,9 +742,13 @@ bool TDoAAnchorModel::PersistModelLocked() const
 
     PersistedAnchorModel stored = {};
     stored.domain = static_cast<uint8_t>(m_domain);
-    stored.pairCount = kPairCount;
+    stored.anchorCount = m_modelAnchorCount == 0 ? m_activeAnchorCount : m_modelAnchorCount;
+    stored.pairCount = ActivePairCountLocked();
     stored.modelVersion = m_modelVersion;
     for (uint8_t i = 0; i < kPairCount; i++) {
+        if (!PairActive(m_pairs[i], m_activeAnchorCount)) {
+            continue;
+        }
         stored.lockedTof[i] = m_pairs[i].lockedTof;
         stored.mad[i] = m_pairs[i].mad;
     }
@@ -673,7 +781,13 @@ bool TDoAAnchorModel::HasLockedModelLocked() const
     if (!m_modelLocked) {
         return false;
     }
+    if (m_modelAnchorCount != m_activeAnchorCount) {
+        return false;
+    }
     for (const auto& pair : m_pairs) {
+        if (!PairActive(pair, m_activeAnchorCount)) {
+            continue;
+        }
         if (!pair.locked) {
             return false;
         }
@@ -685,11 +799,19 @@ uint8_t TDoAAnchorModel::HealthyLockedPairCountLocked() const
 {
     uint8_t count = 0;
     for (const auto& pair : m_pairs) {
+        if (!PairActive(pair, m_activeAnchorCount)) {
+            continue;
+        }
         if (pair.locked && pair.healthy) {
             count++;
         }
     }
     return count;
+}
+
+uint8_t TDoAAnchorModel::ActivePairCountLocked() const
+{
+    return ActivePairCountForAnchorCount(m_activeAnchorCount);
 }
 
 bool TDoAAnchorModel::EnsureSampleStorageLocked()

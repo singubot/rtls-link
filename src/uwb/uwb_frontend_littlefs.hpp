@@ -12,6 +12,7 @@ public:
 
     virtual void Init() override;
     virtual void Update() override;
+    virtual ErrorParam LoadParams() override;
     virtual ErrorParam SetParam(const char* name, const void* data, uint32_t len) override;
 
     virtual etl::span<const ParamDef> GetParamLayout() const override {
@@ -22,7 +23,7 @@ public:
         return etl::string_view("uwb");
     }
 
-    void SetRuntimeEnabled(bool enabled);
+    bool SetRuntimeEnabled(bool enabled);
 
     UWBParams& GetParams() {
         return m_Params;
@@ -32,9 +33,19 @@ public:
 
 protected:
     void InitBackendForCurrentMode();
+    bool HasBackendModeMismatch() const;
+    bool ApplyLoadedRuntimeConfig();
+    bool RestoreTagRuntimeState(const UWBParams& params,
+                                bool restoreEstimator,
+                                bool restoreRtlslinkBeacon,
+                                bool clearPendingDynamicBeacon = false);
+    bool ApplyTagRuntimeAnchorsTransaction(bool applyEstimator, bool applyRtlslinkBeacon);
+    bool ClearRtlslinkBeaconAnchors();
+    bool ApplyStaticAnchorsToLiveBackends(bool applyEstimator, bool applyRtlslinkBeacon);
     etl::vector<UWBAnchorParam, UWBParams::maxAnchorCount> GetAnchors();
 
     UWBBackend* m_Backend = nullptr;
+    UWBMode m_BackendMode = UWBMode::UNKNOWN;
 
 public:
     static constexpr ParamDef s_ParamDefs[] = {
@@ -68,6 +79,14 @@ public:
         PARAM_DEF(UWBParams, x6),
         PARAM_DEF(UWBParams, y6),
         PARAM_DEF(UWBParams, z6),
+        PARAM_DEF(UWBParams, devId7),
+        PARAM_DEF(UWBParams, x7),
+        PARAM_DEF(UWBParams, y7),
+        PARAM_DEF(UWBParams, z7),
+        PARAM_DEF(UWBParams, devId8),
+        PARAM_DEF(UWBParams, x8),
+        PARAM_DEF(UWBParams, y8),
+        PARAM_DEF(UWBParams, z8),
         PARAM_DEF(UWBParams, ADelay),
         PARAM_DEF(UWBParams, originLat),
         PARAM_DEF(UWBParams, originLon),
@@ -102,6 +121,7 @@ public:
         PARAM_DEF(UWBParams, dynamicAnchorPosEnabled),
         PARAM_DEF(UWBParams, anchorLayout),
         PARAM_DEF(UWBParams, anchorHeight),
+        PARAM_DEF(UWBParams, anchorPlaneSeparation),
         PARAM_DEF(UWBParams, anchorPosLocked),
         PARAM_DEF(UWBParams, distanceAvgSamples),
         PARAM_DEF(UWBParams, tdoaAnchorModelMode),

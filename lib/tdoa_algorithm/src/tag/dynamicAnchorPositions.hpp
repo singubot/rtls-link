@@ -4,7 +4,8 @@
  *
  * This module calculates anchor positions dynamically from the inter-anchor
  * distance measurements broadcast in TDoA packets. It supports rectangular
- * 4-anchor layouts and provides averaging/filtering of distance measurements.
+ * 4-anchor single-plane layouts and 8-anchor two-plane layouts, and provides
+ * averaging/filtering of distance measurements.
  *
  * The calculator uses the distances array from TDoA anchor packets, which
  * contains the measured time-of-flight distances between anchors.
@@ -25,8 +26,7 @@ constexpr float DW1000_TIME_TO_METERS = 0.004691763978616f;
 // Maximum number of anchors supported
 constexpr uint8_t MAX_DYNAMIC_ANCHORS = 8;
 
-// Staleness timeout for accumulated distances (in FreeRTOS ticks, configTICK_RATE_HZ = 1000)
-// User preference: 5 seconds timeout, warn only (don't reset data)
+// Staleness timeout for finalized distances (in FreeRTOS ticks, configTICK_RATE_HZ = 1000)
 constexpr uint32_t STALENESS_TIMEOUT_TICKS = 5000;
 
 /**
@@ -34,8 +34,9 @@ constexpr uint32_t STALENESS_TIMEOUT_TICKS = 5000;
  */
 struct DynamicAnchorConfig {
     uint8_t layout;              // AnchorLayout enum value
-    uint8_t anchorCount;         // Number of anchors in the system (typically 4)
-    float anchorHeight;          // Height for Z calculation (NED: Z = -anchorHeight)
+    uint8_t anchorCount;         // Number of anchors in the layout (4 for 2D, 8 for 3D)
+    float anchorHeight;          // Lower-plane height (NED: Z = -anchorHeight)
+    float anchorPlaneSeparation; // Vertical distance from lower plane to upper plane
     uint16_t avgSampleCount;     // Samples to average before calculating (default: 50)
     uint8_t lockedMask;          // Bitmask of locked anchor positions
 };
@@ -88,8 +89,9 @@ struct DistanceAccumulator {
  *
  * This class receives inter-anchor distance measurements extracted from TDoA
  * packets and calculates the 2D/3D positions of anchors based on the configured
- * layout. It supports position locking for individual anchors and provides
- * averaging to smooth out measurement noise.
+ * layout. The 8-anchor layout places A4 above A0, A5 above A1, A6 above A2,
+ * and A7 above A3. It supports position locking for individual anchors and
+ * provides averaging to smooth out measurement noise.
  *
  * Example usage:
  * @code
@@ -97,7 +99,8 @@ struct DistanceAccumulator {
  * DynamicAnchorConfig config = {
  *     .layout = 0,  // RECTANGULAR_A1X_A3Y (A0 at origin, +X=A1, +Y=A3)
  *     .anchorCount = 4,
- *     .anchorHeight = 2.0f,  // 2 meters high
+ *     .anchorHeight = 2.0f,  // lower plane 2 meters high
+ *     .anchorPlaneSeparation = 0.0f,
  *     .avgSampleCount = 50,
  *     .lockedMask = 0
  * };
@@ -132,10 +135,20 @@ public:
     void updateDistance(uint8_t fromAnchor, uint8_t toAnchor, float distanceMeters);
 
     /**
+     * @brief Update with an explicit timestamp. Used by tests and by updateDistance().
+     */
+    void updateDistanceAt(uint8_t fromAnchor, uint8_t toAnchor, float distanceMeters, uint32_t timestamp);
+
+    /**
      * @brief Check if enough data is available to calculate positions
      * @return true if calculation can proceed
      */
     bool canCalculate() const;
+
+    /**
+     * @brief Check readiness with an explicit timestamp for finalized-distance freshness.
+     */
+    bool canCalculateAt(uint32_t currentTime) const;
 
     /**
      * @brief Calculate anchor positions from averaged distances
@@ -156,7 +169,7 @@ public:
      * @brief Set the locked anchor bitmask
      * @param mask Bitmask where bit N indicates anchor N is locked
      */
-    void setLockedMask(uint8_t mask) { m_config.lockedMask = mask; }
+    void setLockedMask(uint8_t mask);
 
     /**
      * @brief Get the current locked anchor bitmask
@@ -217,14 +230,19 @@ private:
     // Final averaged distance values (used for position calculation)
     float m_averagedDistances[MAX_DYNAMIC_ANCHORS][MAX_DYNAMIC_ANCHORS];
 
+    // Last update timestamp for each finalized averaged distance.
+    uint32_t m_averagedDistanceLastUpdate[MAX_DYNAMIC_ANCHORS][MAX_DYNAMIC_ANCHORS];
+
     // Locked positions (preserved when anchor is locked)
     point_t m_lockedPositions[MAX_DYNAMIC_ANCHORS];
+    bool m_lockedPositionValid[MAX_DYNAMIC_ANCHORS];
 
     // Bitmask indicating which averaged distances are valid
     uint8_t m_validDistanceMask[MAX_DYNAMIC_ANCHORS];
 
     // Last calculated positions (for locking)
     point_t m_lastCalculatedPositions[MAX_DYNAMIC_ANCHORS];
+    bool m_lastCalculatedPositionValid[MAX_DYNAMIC_ANCHORS];
 
     /**
      * @brief Calculate positions for rectangular layout
@@ -242,6 +260,8 @@ private:
      * @return true if distances are geometrically valid
      */
     bool validateRectangular(float dX, float dY, float dDiag);
+
+    bool hasFreshDistance(uint8_t from, uint8_t to, uint32_t currentTime) const;
 
     /**
      * @brief Finalize averages when accumulator is ready
