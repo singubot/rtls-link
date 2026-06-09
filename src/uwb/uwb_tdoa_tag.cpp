@@ -104,7 +104,7 @@ static constexpr uint8_t kDynamicAnchorCount3D = 8;
 
 using PairSlot = tdoa::MeasurementSlot;
 
-static constexpr size_t kMin3DMeasurementsForSolve = 7;
+static constexpr size_t kMin3DMeasurementsForSolve = 8;
 static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 6;
 static constexpr uint8_t kMin3DPlaneAnchorsPerSide = 2;
 static constexpr uint64_t kMax3DBatchSpanUs = 120000;
