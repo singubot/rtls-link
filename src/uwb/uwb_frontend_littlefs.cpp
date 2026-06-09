@@ -220,7 +220,8 @@ bool validateStaticTagGeometryForParams(const UWBParams& params,
     }
     return UWBTagTDoA::ValidateStaticAnchorsForEstimator(
         anchors,
-        params.use2DEstimator != 0);
+        params.use2DEstimator != 0,
+        params.tdoaEstimatorMode);
 }
 #endif
 

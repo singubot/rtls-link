@@ -104,8 +104,10 @@ static constexpr uint8_t kDynamicAnchorCount3D = 8;
 
 using PairSlot = tdoa::MeasurementSlot;
 
-static constexpr size_t kMin3DMeasurementsForSolve = 8;
-static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 6;
+static constexpr size_t kLegacy3DMeasurementsForSolve = 5;
+static constexpr uint8_t kLegacy3DUniqueAnchorsForSolve = 4;
+static constexpr size_t kRobust3DMeasurementsForSolve = 8;
+static constexpr uint8_t kRobust3DUniqueAnchorsForSolve = 6;
 static constexpr uint8_t kMin3DPlaneAnchorsPerSide = 2;
 static constexpr uint64_t kMax3DBatchSpanUs = 120000;
 static constexpr tdoa_estimator::Scalar kMin3DPlaneSeparationM = 0.5f;
@@ -1314,7 +1316,8 @@ bool UWBTagTDoA::ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors)
 }
 
 bool UWBTagTDoA::ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorParam> anchors,
-                                                   bool use2DEstimator)
+                                                   bool use2DEstimator,
+                                                   uint8_t tdoaEstimatorMode)
 {
     if (!ValidateStaticAnchors(anchors)) {
         return false;
@@ -1323,9 +1326,12 @@ bool UWBTagTDoA::ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorPara
         LOG_ERROR("Rejected static anchor config: 2D estimator requires at least 4 anchors");
         return false;
     }
-    if (!use2DEstimator && anchors.size() < kMin3DUniqueAnchorsForSolve) {
+    const uint8_t min3DAnchors = sanitizeEstimatorMode(tdoaEstimatorMode) == kEstimatorModeLegacy
+        ? kLegacy3DUniqueAnchorsForSolve
+        : kRobust3DUniqueAnchorsForSolve;
+    if (!use2DEstimator && anchors.size() < min3DAnchors) {
         LOG_ERROR("Rejected static anchor config: 3D estimator requires at least %u anchors",
-                  static_cast<unsigned int>(kMin3DUniqueAnchorsForSolve));
+                  static_cast<unsigned int>(min3DAnchors));
         return false;
     }
     if (!use2DEstimator && !anchorsAreNonCoplanar3D(anchors)) {
@@ -1427,8 +1433,8 @@ static tdoa_estimator::RobustEstimatorOptions makeRobustOptions(
     uint8_t maxIterations)
 {
     tdoa_estimator::RobustEstimatorOptions options;
-    options.min_rows = static_cast<uint8_t>(kMin3DMeasurementsForSolve);
-    options.min_unique_anchors = kMin3DUniqueAnchorsForSolve;
+    options.min_rows = static_cast<uint8_t>(kRobust3DMeasurementsForSolve);
+    options.min_unique_anchors = kRobust3DUniqueAnchorsForSolve;
     options.max_selected_rows = kEstimatorMaxSelectedRows;
     options.max_iterations = maxIterations;
     options.convergence_threshold = 1e-3f;
@@ -1576,7 +1582,7 @@ static EstimatorGeometryStats evaluate3DGeometry(const PairSlot* rows,
 
 static bool is3DGeometryAcceptable(const EstimatorGeometryStats& stats)
 {
-    return stats.uniqueAnchors >= kMin3DUniqueAnchorsForSolve
+    return stats.uniqueAnchors >= kRobust3DUniqueAnchorsForSolve
         && stats.lowPlaneAnchors >= kMin3DPlaneAnchorsPerSide
         && stats.highPlaneAnchors >= kMin3DPlaneAnchorsPerSide
         && stats.xSpanningPairs >= kMin3DAxisSpanningPairs
@@ -1643,9 +1649,14 @@ static void estimatorProcess() {
     const auto& currentParams = Front::uwbLittleFSFront.GetParams();
     const bool USE_2D_ESTIMATOR = (currentParams.use2DEstimator != 0);
     const uint8_t runtimeEstimatorMode = sanitizeEstimatorMode(currentParams.tdoaEstimatorMode);
+    const bool useLegacy3DMode = !USE_2D_ESTIMATOR && runtimeEstimatorMode == kEstimatorModeLegacy;
+    const bool useRobust3DGates = !USE_2D_ESTIMATOR && !useLegacy3DMode;
     const size_t min_measurements = USE_2D_ESTIMATOR
         ? kMinMeasurementsForNotify
-        : kMin3DMeasurementsForSolve;
+        : (useLegacy3DMode ? kLegacy3DMeasurementsForSolve : kRobust3DMeasurementsForSolve);
+    const uint8_t min_unique_anchors = USE_2D_ESTIMATOR
+        ? 0
+        : (useLegacy3DMode ? kLegacy3DUniqueAnchorsForSolve : kRobust3DUniqueAnchorsForSolve);
     if (USE_2D_ESTIMATOR != last_use_2d) {
         first_estimation = true;
         last_use_2d = USE_2D_ESTIMATOR;
@@ -1708,7 +1719,7 @@ static void estimatorProcess() {
                                              min_measurements,
                                              snapshot,
                                              kNumPairs,
-                                             USE_2D_ESTIMATOR ? 0 : kMin3DUniqueAnchorsForSolve,
+                                             min_unique_anchors,
                                              USE_2D_ESTIMATOR ? 0 : kMax3DBatchSpanUs);
 
         have_enough = snapshotResult.haveEnough;
@@ -1827,7 +1838,7 @@ static void estimatorProcess() {
         solveStats.diagLevel = estimatorDiagLevel;
         solveStats.inputRows = clampToU8(copy_count);
         solveStats.selectedRows = clampToU8(copy_count);
-        if (!USE_2D_ESTIMATOR) {
+        if (useRobust3DGates) {
             const EstimatorGeometryStats geometryStats =
                 evaluate3DGeometry(snapshot, copy_count, anchor_snapshot, current_estimate_3d);
             solveStats.uniqueAnchors = geometryStats.uniqueAnchors;
