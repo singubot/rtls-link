@@ -53,7 +53,7 @@ public:
     static String GetEstimatorStatsJson();
     static void ResetEstimatorStats();
     static bool ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors);
-    static bool ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorParam> anchors, bool use2DEstimator);
+    static bool ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorParam> anchors, bool use2DEstimator, uint8_t tdoaEstimatorMode);
     static bool ApplyStaticAnchors(etl::span<const UWBAnchorParam> anchors);
 #ifdef ESP32S3_UWB_BOARD
     static void ApplyMatcherPolicy(uint8_t policy);

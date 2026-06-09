@@ -21,6 +21,7 @@ enum class FrameType : uint8_t {
     LogMessage = 17,
     TdoaEstimatorStatus = 32,
     TdoaAnchorStats = 33,
+    TdoaPositionEstimatorStatus = 34,
 };
 
 enum class StatusCode : uint8_t {

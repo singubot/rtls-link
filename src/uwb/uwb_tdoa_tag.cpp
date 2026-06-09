@@ -15,10 +15,12 @@
 #include <atomic>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <array>
 
 #include "tdoa_newton_raphson.hpp"
+#include "tdoa_robust_estimator.hpp"
 
 #include "tag/tdoa_tag_algorithm.hpp"
 
@@ -31,6 +33,7 @@
 #include "uwb_frontend_littlefs.hpp"
 #include "tdoa_anchor_model.hpp"
 #include "tdoa_anchor_model_commands.hpp"
+#include "tdoa_position_estimator_commands.hpp"
 #include "tdoa_common.hpp"
 #include "tdoa_measurement_buffer.hpp"
 #include "tdoa_pairs.hpp"
@@ -101,10 +104,87 @@ static constexpr uint8_t kDynamicAnchorCount3D = 8;
 
 using PairSlot = tdoa::MeasurementSlot;
 
-static constexpr size_t kMin3DMeasurementsForSolve = 5;
-static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 4;
+static constexpr size_t kLegacy3DMeasurementsForSolve = 5;
+static constexpr uint8_t kLegacy3DUniqueAnchorsForSolve = 4;
+static constexpr size_t kRobust3DMeasurementsForSolve = 8;
+static constexpr uint8_t kRobust3DUniqueAnchorsForSolve = 6;
+static constexpr uint8_t kMin3DPlaneAnchorsPerSide = 2;
 static constexpr uint64_t kMax3DBatchSpanUs = 120000;
+static constexpr tdoa_estimator::Scalar kMin3DPlaneSeparationM = 0.5f;
+static constexpr tdoa_estimator::Scalar kMin3DAnchorAxisSeparationM = 0.5f;
+static constexpr tdoa_estimator::Scalar kMin3DGeometryHorizontalInformation = 0.25f;
+static constexpr tdoa_estimator::Scalar kMin3DGeometryZInformation = 0.25f;
+static constexpr tdoa_estimator::Scalar kMin3DGeometryDeterminantRatio = 3.0e-4f;
+static constexpr uint8_t kMin3DAxisSpanningPairs = 1;
+static constexpr uint8_t kMin3DCrossPlanePairs = 2;
+static constexpr uint8_t kMin3DSamePlanePairs = 1;
 static constexpr tdoa_estimator::Scalar kMax3DPositionVarianceM2 = 9.0f;
+static constexpr uint8_t kEstimatorModeLegacy = 0;
+static constexpr uint8_t kEstimatorModeRobust = 1;
+static constexpr uint8_t kEstimatorModeCompare = 2;
+static constexpr uint8_t kEstimatorMode2D = 255;
+static constexpr uint8_t kEstimatorDiagOff = 0;
+static constexpr uint8_t kEstimatorDiagSummary = 1;
+static constexpr uint8_t kEstimatorDiagRows = 2;
+static constexpr uint8_t kEstimatorMaxSelectedRows = 20;
+static constexpr uint8_t kEstimatorSelectedDiagCapacity = 12;
+
+enum EstimatorDiagnosticFlags : uint8_t {
+    kEstimatorDiagFlagAccepted = 1u << 0,
+    kEstimatorDiagFlagRobustPass = 1u << 1,
+    kEstimatorDiagFlagPairSelection = 1u << 2,
+    kEstimatorDiagFlagCompareMode = 1u << 3,
+    kEstimatorDiagFlagFallbackLegacy = 1u << 4,
+    kEstimatorDiagFlagCovarianceSent = 1u << 5,
+    kEstimatorDiagFlagCovarianceInvalid = 1u << 6,
+    kEstimatorDiagFlagRobustInvalid = 1u << 7,
+};
+
+static uint8_t sanitizeEstimatorMode(uint8_t mode)
+{
+    return mode <= kEstimatorModeCompare ? mode : kEstimatorModeRobust;
+}
+
+static uint8_t sanitizeEstimatorDiag(uint8_t diag)
+{
+    return diag <= kEstimatorDiagRows ? diag : kEstimatorDiagOff;
+}
+
+static uint32_t elapsedUs(uint64_t start_us)
+{
+    const uint64_t elapsed = static_cast<uint64_t>(esp_timer_get_time()) - start_us;
+    return elapsed > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(elapsed);
+}
+
+static uint32_t metersToMillimetersUnsigned(double meters)
+{
+    if (!std::isfinite(meters) || meters <= 0.0) {
+        return 0;
+    }
+    const double scaled = meters * 1000.0;
+    return scaled >= static_cast<double>(UINT32_MAX)
+        ? UINT32_MAX
+        : static_cast<uint32_t>(scaled + 0.5);
+}
+
+static int32_t metersToMillimetersSigned(float meters)
+{
+    if (!std::isfinite(meters)) {
+        return 0;
+    }
+    return rtls::protocol::MetersToMillimeters(meters);
+}
+
+static uint8_t weightToQ8(tdoa_estimator::Scalar weight)
+{
+    if (!std::isfinite(static_cast<double>(weight)) || weight <= 0.0f) {
+        return 0;
+    }
+    if (weight >= 1.0f) {
+        return UINT8_MAX;
+    }
+    return static_cast<uint8_t>((weight * 255.0f) + 0.5f);
+}
 
 static bool is3DCovarianceAcceptable(const tdoa_estimator::CovMatrix3D& covariance)
 {
@@ -366,6 +446,37 @@ static volatile bool isr_flag = false;
 static uint8_t cached_anchors_seen = 0;
 static TDoAAnchorModel s_anchorModel;
 
+struct EstimatorSelectedRowStats {
+    uint8_t anchorA = 0;
+    uint8_t anchorB = 0;
+    int32_t residualMm = 0;
+    uint8_t baseWeightQ8 = 0;
+    uint8_t finalWeightQ8 = 0;
+};
+
+struct EstimatorSolveStats {
+    uint8_t mode = kEstimatorModeRobust;
+    uint8_t diagLevel = kEstimatorDiagOff;
+    uint8_t flags = 0;
+    uint8_t inputRows = 0;
+    uint8_t selectedRows = 0;
+    uint8_t uniqueAnchors = 0;
+    uint8_t iterations = 0;
+    uint32_t solveUs = 0;
+    uint32_t legacySolveUs = 0;
+    uint32_t robustSolveUs = 0;
+    uint32_t rmseMm = 0;
+    uint32_t residualScaleMm = 0;
+    int32_t xMm = 0;
+    int32_t yMm = 0;
+    int32_t zMm = 0;
+    uint32_t compareDeltaMm = 0;
+    uint32_t legacyRmseMm = 0;
+    uint32_t robustRmseMm = 0;
+    uint8_t selectedDiagCount = 0;
+    EstimatorSelectedRowStats selected[kEstimatorSelectedDiagCapacity] = {};
+};
+
 struct EstimatorStats {
     uint32_t samplesSent = 0;
     uint32_t samplesRejected = 0;
@@ -377,10 +488,19 @@ struct EstimatorStats {
     uint8_t lastMeasurementCount = 0;
     uint8_t minMeasurementCount = UINT8_MAX;
     uint8_t maxMeasurementCount = 0;
+    uint32_t solveCount = 0;
+    uint64_t solveSumUs = 0;
+    uint32_t solveMinUs = UINT32_MAX;
+    uint32_t solveMaxUs = 0;
+    uint32_t compareRuns = 0;
+    uint32_t compareFallbackLegacy = 0;
+    uint32_t compareRobustInvalid = 0;
+    EstimatorSolveStats lastSolve = {};
 };
 
 static EstimatorStats* s_estimatorStats = nullptr;
 static SemaphoreHandle_t estimator_stats_mtx = nullptr;
+static std::atomic<uint32_t> s_estimatorProducerDroppedTotal{0};
 
 static tdoaEngineMatchingAlgorithm_t matcherPolicyFromParam(uint8_t policy)
 {
@@ -434,11 +554,45 @@ static void recordEstimatorInputTdoa(uint8_t anchorA, uint8_t anchorB, float dis
     (void)distanceDiffMeters;
 }
 
+static uint8_t clampToU8(size_t value)
+{
+    return value > UINT8_MAX ? UINT8_MAX : static_cast<uint8_t>(value);
+}
+
+static void recordEstimatorSolveStats(const EstimatorSolveStats& solveStats)
+{
+    ensureEstimatorStatsMutex();
+    if (s_estimatorStats == nullptr || estimator_stats_mtx == nullptr || xSemaphoreTake(estimator_stats_mtx, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return;
+    }
+
+    s_estimatorStats->lastSolve = solveStats;
+    if (solveStats.solveUs > 0) {
+        s_estimatorStats->solveCount++;
+        s_estimatorStats->solveSumUs += solveStats.solveUs;
+        if (solveStats.solveUs < s_estimatorStats->solveMinUs) {
+            s_estimatorStats->solveMinUs = solveStats.solveUs;
+        }
+        if (solveStats.solveUs > s_estimatorStats->solveMaxUs) {
+            s_estimatorStats->solveMaxUs = solveStats.solveUs;
+        }
+    }
+    if ((solveStats.flags & kEstimatorDiagFlagCompareMode) != 0) {
+        s_estimatorStats->compareRuns++;
+    }
+    if ((solveStats.flags & kEstimatorDiagFlagFallbackLegacy) != 0) {
+        s_estimatorStats->compareFallbackLegacy++;
+    }
+    if ((solveStats.flags & kEstimatorDiagFlagRobustInvalid) != 0) {
+        s_estimatorStats->compareRobustInvalid++;
+    }
+
+    xSemaphoreGive(estimator_stats_mtx);
+}
+
 static void recordMeasurementCountLocked(size_t measurementCount)
 {
-    const uint8_t clampedCount = measurementCount > UINT8_MAX
-        ? UINT8_MAX
-        : static_cast<uint8_t>(measurementCount);
+    const uint8_t clampedCount = clampToU8(measurementCount);
     if (clampedCount < s_estimatorStats->minMeasurementCount) {
         s_estimatorStats->minMeasurementCount = clampedCount;
     }
@@ -458,9 +612,7 @@ static void recordEstimatorAccepted(float x, float y, float z, double rmse, size
     s_estimatorStats->lastRmseMm = rmse > 0.0
         ? static_cast<uint32_t>((rmse * 1000.0) + 0.5)
         : 0;
-    s_estimatorStats->lastMeasurementCount = measurementCount > UINT8_MAX
-        ? UINT8_MAX
-        : static_cast<uint8_t>(measurementCount);
+    s_estimatorStats->lastMeasurementCount = clampToU8(measurementCount);
     recordMeasurementCountLocked(measurementCount);
     (void)x;
     (void)y;
@@ -486,9 +638,7 @@ static void recordEstimatorRejected(bool rmse, bool nan, bool insufficient, size
     if (insufficient) {
         s_estimatorStats->rejectInsufficient++;
     }
-    s_estimatorStats->lastMeasurementCount = measurementCount > UINT8_MAX
-        ? UINT8_MAX
-        : static_cast<uint8_t>(measurementCount);
+    s_estimatorStats->lastMeasurementCount = clampToU8(measurementCount);
     recordMeasurementCountLocked(measurementCount);
 
     xSemaphoreGive(estimator_stats_mtx);
@@ -516,8 +666,130 @@ static void resetEstimatorStats()
     }
 
     *s_estimatorStats = EstimatorStats();
+    s_estimatorProducerDroppedTotal.store(0, std::memory_order_relaxed);
 
     xSemaphoreGive(estimator_stats_mtx);
+}
+
+static bool copyEstimatorStats(EstimatorStats& outStats)
+{
+    ensureEstimatorStatsMutex();
+    if (s_estimatorStats == nullptr || estimator_stats_mtx == nullptr || xSemaphoreTake(estimator_stats_mtx, pdMS_TO_TICKS(10)) != pdTRUE) {
+        return false;
+    }
+    outStats = *s_estimatorStats;
+    xSemaphoreGive(estimator_stats_mtx);
+    return true;
+}
+
+static String positionEstimatorStatsJson()
+{
+    EstimatorStats stats;
+    if (!copyEstimatorStats(stats)) {
+        return String("{\"success\":false,\"error\":\"estimator stats unavailable\"}");
+    }
+
+    const uint32_t dropped = s_estimatorProducerDroppedTotal.load(std::memory_order_relaxed);
+    const uint32_t solveAvgUs = stats.solveCount > 0
+        ? static_cast<uint32_t>(stats.solveSumUs / stats.solveCount)
+        : 0;
+
+    String result;
+    result.reserve(384);
+    result += "{\"success\":true";
+    result += ",\"mode\":";
+    result += static_cast<unsigned int>(stats.lastSolve.mode);
+    result += ",\"diag\":";
+    result += static_cast<unsigned int>(stats.lastSolve.diagLevel);
+    result += ",\"flags\":";
+    result += static_cast<unsigned int>(stats.lastSolve.flags);
+    result += ",\"sent\":";
+    result += static_cast<unsigned long>(stats.samplesSent);
+    result += ",\"rejected\":";
+    result += static_cast<unsigned long>(stats.samplesRejected);
+    result += ",\"producerDropped\":";
+    result += static_cast<unsigned long>(dropped);
+    result += ",\"lastRows\":";
+    result += static_cast<unsigned int>(stats.lastSolve.inputRows);
+    result += ",\"selectedRows\":";
+    result += static_cast<unsigned int>(stats.lastSolve.selectedRows);
+    result += ",\"lastRmseMm\":";
+    result += static_cast<unsigned long>(stats.lastSolve.rmseMm);
+    result += ",\"lastSolveUs\":";
+    result += static_cast<unsigned long>(stats.lastSolve.solveUs);
+    result += ",\"solveAvgUs\":";
+    result += static_cast<unsigned long>(solveAvgUs);
+    result += ",\"compareRuns\":";
+    result += static_cast<unsigned long>(stats.compareRuns);
+    result += ",\"compareFallbackLegacy\":";
+    result += static_cast<unsigned long>(stats.compareFallbackLegacy);
+    result += ",\"compareRobustInvalid\":";
+    result += static_cast<unsigned long>(stats.compareRobustInvalid);
+    result += "}";
+    return result;
+}
+
+static void appendPositionEstimatorStatus(rtls::protocol::BinaryFrameBuilder<2048>& outFrame)
+{
+    EstimatorStats stats;
+    if (!copyEstimatorStats(stats)) {
+        outFrame.Begin(rtls::protocol::FrameType::TdoaPositionEstimatorStatus,
+                       rtls::protocol::StatusCode::Error);
+        outFrame.AppendString("estimator stats unavailable");
+        outFrame.Finish();
+        return;
+    }
+
+    const EstimatorSolveStats& solve = stats.lastSolve;
+    const uint32_t dropped = s_estimatorProducerDroppedTotal.load(std::memory_order_relaxed);
+    const uint32_t solveAvgUs = stats.solveCount > 0
+        ? static_cast<uint32_t>(stats.solveSumUs / stats.solveCount)
+        : 0;
+
+    outFrame.Begin(rtls::protocol::FrameType::TdoaPositionEstimatorStatus);
+    outFrame.AppendU8(solve.mode);
+    outFrame.AppendU8(solve.diagLevel);
+    outFrame.AppendU8(solve.flags);
+    outFrame.AppendU8(solve.inputRows);
+    outFrame.AppendU8(solve.selectedRows);
+    outFrame.AppendU8(solve.uniqueAnchors);
+    outFrame.AppendU8(solve.iterations);
+    outFrame.AppendU8(0); // reserved
+    outFrame.AppendU32(stats.samplesSent);
+    outFrame.AppendU32(stats.samplesRejected);
+    outFrame.AppendU32(stats.rejectRmse);
+    outFrame.AppendU32(stats.rejectNan);
+    outFrame.AppendU32(stats.rejectInsufficient);
+    outFrame.AppendU32(stats.staleRemoved);
+    outFrame.AppendU32(dropped);
+    outFrame.AppendU32(stats.solveCount);
+    outFrame.AppendU32(stats.solveMinUs == UINT32_MAX ? 0 : stats.solveMinUs);
+    outFrame.AppendU32(solveAvgUs);
+    outFrame.AppendU32(stats.solveMaxUs);
+    outFrame.AppendU32(solve.solveUs);
+    outFrame.AppendU32(solve.legacySolveUs);
+    outFrame.AppendU32(solve.robustSolveUs);
+    outFrame.AppendU32(solve.rmseMm);
+    outFrame.AppendU32(solve.residualScaleMm);
+    outFrame.AppendI32(solve.xMm);
+    outFrame.AppendI32(solve.yMm);
+    outFrame.AppendI32(solve.zMm);
+    outFrame.AppendU32(stats.compareRuns);
+    outFrame.AppendU32(stats.compareFallbackLegacy);
+    outFrame.AppendU32(stats.compareRobustInvalid);
+    outFrame.AppendU32(solve.legacyRmseMm);
+    outFrame.AppendU32(solve.robustRmseMm);
+    outFrame.AppendU32(solve.compareDeltaMm);
+    outFrame.AppendU8(solve.selectedDiagCount);
+    for (uint8_t i = 0; i < solve.selectedDiagCount; i++) {
+        const EstimatorSelectedRowStats& row = solve.selected[i];
+        outFrame.AppendU8(row.anchorA);
+        outFrame.AppendU8(row.anchorB);
+        outFrame.AppendI32(row.residualMm);
+        outFrame.AppendU8(row.baseWeightQ8);
+        outFrame.AppendU8(row.finalWeightQ8);
+    }
+    outFrame.Finish();
 }
 
 static String anchorModelStatus()
@@ -884,11 +1156,16 @@ static FAST_CODE void estimatorCallback(tdoaMeasurement_t* tdoa)
     }
     const uint8_t idx = tdoa::PairIndexCanonical(pair, kNumAnchors);
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    const uint64_t measurement_time_us =
+        (tdoa->solvedTimestampUs != 0 && tdoa->solvedTimestampUs <= now_us)
+            ? tdoa->solvedTimestampUs
+            : now_us;
 
     // Bounded mutex wait — if the consumer is mid-solve we drop this sample
     // rather than backpressure the UWB stack. One TDoA frame missing is
     // invisible compared to the cost of stalling the producer.
     if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(kProducerMutexTimeoutMs)) != pdTRUE) {
+        s_estimatorProducerDroppedTotal.fetch_add(1, std::memory_order_relaxed);
 #if TDOA_STATS_LOGGING == ENABLE
         stats_producer_dropped.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -903,10 +1180,13 @@ static FAST_CODE void estimatorCallback(tdoaMeasurement_t* tdoa)
     PairSlot& slot = pair_slots[idx];
     const bool was_fresh = slot.fresh;
     slot.tdoa = canonical_tdoa;
-    slot.timestamp_us = now_us;
+    slot.timestamp_us = measurement_time_us;
     slot.anchor_a = pair.a;
     slot.anchor_b = pair.b;
     slot.fresh = true;
+    slot.sigma_m = (std::isfinite(tdoa->stdDev) && tdoa->stdDev > 0.0f)
+        ? tdoa->stdDev
+        : 0.15f;
     // Update fresh-pair count INSIDE the mutex so it stays serialized with
     // the slot.fresh transition. Doing this outside the mutex races against
     // the consumer's fetch_sub and can underflow the counter.
@@ -1036,7 +1316,8 @@ bool UWBTagTDoA::ValidateStaticAnchors(etl::span<const UWBAnchorParam> anchors)
 }
 
 bool UWBTagTDoA::ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorParam> anchors,
-                                                   bool use2DEstimator)
+                                                   bool use2DEstimator,
+                                                   uint8_t tdoaEstimatorMode)
 {
     if (!ValidateStaticAnchors(anchors)) {
         return false;
@@ -1045,9 +1326,12 @@ bool UWBTagTDoA::ValidateStaticAnchorsForEstimator(etl::span<const UWBAnchorPara
         LOG_ERROR("Rejected static anchor config: 2D estimator requires at least 4 anchors");
         return false;
     }
-    if (!use2DEstimator && anchors.size() < kMin3DUniqueAnchorsForSolve) {
+    const uint8_t min3DAnchors = sanitizeEstimatorMode(tdoaEstimatorMode) == kEstimatorModeLegacy
+        ? kLegacy3DUniqueAnchorsForSolve
+        : kRobust3DUniqueAnchorsForSolve;
+    if (!use2DEstimator && anchors.size() < min3DAnchors) {
         LOG_ERROR("Rejected static anchor config: 3D estimator requires at least %u anchors",
-                  static_cast<unsigned int>(kMin3DUniqueAnchorsForSolve));
+                  static_cast<unsigned int>(min3DAnchors));
         return false;
     }
     if (!use2DEstimator && !anchorsAreNonCoplanar3D(anchors)) {
@@ -1099,7 +1383,7 @@ String ExportJson()
 
 String EstimatorStatsJson()
 {
-    return String();
+    return positionEstimatorStatsJson();
 }
 
 void AppendBinaryStatus(rtls::protocol::BinaryFrameBuilder<2048>& outFrame, uint8_t view)
@@ -1113,13 +1397,246 @@ void ResetEstimatorStats()
 }
 }
 
+namespace TDoAPositionEstimatorCommands {
+
+String StatusJson()
+{
+    return positionEstimatorStatsJson();
+}
+
+void AppendBinaryStatus(rtls::protocol::BinaryFrameBuilder<2048>& outFrame)
+{
+    appendPositionEstimatorStatus(outFrame);
+}
+
+void ResetStats()
+{
+    resetEstimatorStats();
+}
+
+}
+
+static bool is3DCovarianceUsable(const tdoa_estimator::SolverResult& result)
+{
+    return result.covarianceValid && is3DCovarianceAcceptable(result.positionCovariance);
+}
+
+static bool is3DResultAcceptable(const tdoa_estimator::SolverResult& result, bool requireCovariance)
+{
+    return result.valid
+        && result.converged
+        && (!requireCovariance || is3DCovarianceUsable(result));
+}
+
+static tdoa_estimator::RobustEstimatorOptions makeRobustOptions(
+    tdoa_estimator::Scalar rmseThreshold,
+    uint8_t maxIterations)
+{
+    tdoa_estimator::RobustEstimatorOptions options;
+    options.min_rows = static_cast<uint8_t>(kRobust3DMeasurementsForSolve);
+    options.min_unique_anchors = kRobust3DUniqueAnchorsForSolve;
+    options.max_selected_rows = kEstimatorMaxSelectedRows;
+    options.max_iterations = maxIterations;
+    options.convergence_threshold = 1e-3f;
+    options.rmse_threshold = rmseThreshold;
+    options.enable_pair_selection = true;
+    options.enable_robust_pass = true;
+    options.reference_sigma_m = 0.15f;
+    return options;
+}
+
+static uint32_t positionDeltaMm(const tdoa_estimator::PosVector3D& a,
+                                const tdoa_estimator::PosVector3D& b)
+{
+    return metersToMillimetersUnsigned((a - b).norm());
+}
+
+struct EstimatorGeometryStats {
+    uint8_t uniqueAnchors = 0;
+    uint8_t lowPlaneAnchors = 0;
+    uint8_t highPlaneAnchors = 0;
+    uint8_t xSpanningPairs = 0;
+    uint8_t ySpanningPairs = 0;
+    uint8_t crossPlanePairs = 0;
+    uint8_t samePlanePairs = 0;
+    tdoa_estimator::Scalar xInformation = 0.0f;
+    tdoa_estimator::Scalar yInformation = 0.0f;
+    tdoa_estimator::Scalar zInformation = 0.0f;
+    tdoa_estimator::Scalar determinantRatio = 0.0f;
+};
+
+static tdoa_estimator::PosVector3D anchorPositionVector(const UWBAnchorParam& anchor)
+{
+    tdoa_estimator::PosVector3D position;
+    position << static_cast<tdoa_estimator::Scalar>(anchor.x),
+                static_cast<tdoa_estimator::Scalar>(anchor.y),
+                static_cast<tdoa_estimator::Scalar>(anchor.z);
+    return position;
+}
+
+static EstimatorGeometryStats evaluate3DGeometry(const PairSlot* rows,
+                                                 size_t rowCount,
+                                                 const etl::array<UWBAnchorParam, kNumAnchors>& anchors,
+                                                 const tdoa_estimator::PosVector3D& referencePosition)
+{
+    EstimatorGeometryStats stats;
+    if (rows == nullptr || rowCount == 0) {
+        return stats;
+    }
+
+    bool anchorSeen[kNumAnchors] = {};
+    tdoa_estimator::Scalar minZ = std::numeric_limits<tdoa_estimator::Scalar>::max();
+    tdoa_estimator::Scalar maxZ = -std::numeric_limits<tdoa_estimator::Scalar>::max();
+    Eigen::Matrix<tdoa_estimator::Scalar, 3, 3> information =
+        Eigen::Matrix<tdoa_estimator::Scalar, 3, 3>::Zero();
+
+    for (size_t i = 0; i < rowCount; i++) {
+        const PairSlot& row = rows[i];
+        if (row.anchor_a >= kNumAnchors || row.anchor_b >= kNumAnchors) {
+            continue;
+        }
+
+        const UWBAnchorParam& anchorParamsA = anchors[row.anchor_a];
+        const UWBAnchorParam& anchorParamsB = anchors[row.anchor_b];
+        if (std::fabs(static_cast<tdoa_estimator::Scalar>(anchorParamsA.x - anchorParamsB.x))
+            >= kMin3DAnchorAxisSeparationM) {
+            stats.xSpanningPairs++;
+        }
+        if (std::fabs(static_cast<tdoa_estimator::Scalar>(anchorParamsA.y - anchorParamsB.y))
+            >= kMin3DAnchorAxisSeparationM) {
+            stats.ySpanningPairs++;
+        }
+        if (std::fabs(static_cast<tdoa_estimator::Scalar>(anchorParamsA.z - anchorParamsB.z))
+            >= kMin3DPlaneSeparationM) {
+            stats.crossPlanePairs++;
+        } else {
+            stats.samePlanePairs++;
+        }
+
+        if (!anchorSeen[row.anchor_a]) {
+            anchorSeen[row.anchor_a] = true;
+            stats.uniqueAnchors++;
+            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchorParamsA.z));
+            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchorParamsA.z));
+        }
+        if (!anchorSeen[row.anchor_b]) {
+            anchorSeen[row.anchor_b] = true;
+            stats.uniqueAnchors++;
+            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchorParamsB.z));
+            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchorParamsB.z));
+        }
+
+        const tdoa_estimator::PosVector3D anchorA = anchorPositionVector(anchorParamsA);
+        const tdoa_estimator::PosVector3D anchorB = anchorPositionVector(anchorParamsB);
+        tdoa_estimator::Scalar distanceA = (referencePosition - anchorA).norm();
+        tdoa_estimator::Scalar distanceB = (referencePosition - anchorB).norm();
+        if (distanceA < tdoa_estimator::Scalar(1.0e-4f)) {
+            distanceA = tdoa_estimator::Scalar(1.0e-4f);
+        }
+        if (distanceB < tdoa_estimator::Scalar(1.0e-4f)) {
+            distanceB = tdoa_estimator::Scalar(1.0e-4f);
+        }
+
+        const tdoa_estimator::PosVector3D gradient =
+            ((referencePosition - anchorA) / distanceA)
+            - ((referencePosition - anchorB) / distanceB);
+        information += gradient * gradient.transpose();
+    }
+
+    if (stats.uniqueAnchors == 0
+        || !std::isfinite(static_cast<double>(minZ))
+        || !std::isfinite(static_cast<double>(maxZ))) {
+        return stats;
+    }
+
+    const tdoa_estimator::Scalar planeSeparation = maxZ - minZ;
+    if (planeSeparation >= kMin3DPlaneSeparationM) {
+        const tdoa_estimator::Scalar midZ = (minZ + maxZ) * tdoa_estimator::Scalar(0.5f);
+        for (uint8_t i = 0; i < kNumAnchors; i++) {
+            if (!anchorSeen[i]) {
+                continue;
+            }
+            if (static_cast<tdoa_estimator::Scalar>(anchors[i].z) < midZ) {
+                stats.lowPlaneAnchors++;
+            } else {
+                stats.highPlaneAnchors++;
+            }
+        }
+    }
+
+    const tdoa_estimator::Scalar trace = information.trace();
+    if (trace > tdoa_estimator::Scalar(1.0e-6f)) {
+        const tdoa_estimator::Scalar determinant =
+            information(0, 0) * ((information(1, 1) * information(2, 2)) - (information(1, 2) * information(2, 1)))
+            - information(0, 1) * ((information(1, 0) * information(2, 2)) - (information(1, 2) * information(2, 0)))
+            + information(0, 2) * ((information(1, 0) * information(2, 1)) - (information(1, 1) * information(2, 0)));
+        if (std::isfinite(static_cast<double>(determinant)) && determinant > tdoa_estimator::Scalar(0)) {
+            stats.determinantRatio = determinant / (trace * trace * trace);
+        }
+    }
+    stats.xInformation = information(0, 0);
+    stats.yInformation = information(1, 1);
+    stats.zInformation = information(2, 2);
+    return stats;
+}
+
+static bool is3DGeometryAcceptable(const EstimatorGeometryStats& stats)
+{
+    return stats.uniqueAnchors >= kRobust3DUniqueAnchorsForSolve
+        && stats.lowPlaneAnchors >= kMin3DPlaneAnchorsPerSide
+        && stats.highPlaneAnchors >= kMin3DPlaneAnchorsPerSide
+        && stats.xSpanningPairs >= kMin3DAxisSpanningPairs
+        && stats.ySpanningPairs >= kMin3DAxisSpanningPairs
+        && stats.crossPlanePairs >= kMin3DCrossPlanePairs
+        && stats.samePlanePairs >= kMin3DSamePlanePairs
+        && stats.xInformation >= kMin3DGeometryHorizontalInformation
+        && stats.yInformation >= kMin3DGeometryHorizontalInformation
+        && stats.zInformation >= kMin3DGeometryZInformation
+        && stats.determinantRatio >= kMin3DGeometryDeterminantRatio;
+}
+
+static void copyRobustDiagnostics(EstimatorSolveStats& outStats,
+                                  const tdoa_estimator::RobustEstimatorResult& result,
+                                  const tdoa_estimator::RobustTdoaRow* rows)
+{
+    outStats.inputRows = result.input_rows;
+    outStats.selectedRows = result.selected_rows;
+    outStats.uniqueAnchors = result.unique_anchors;
+    outStats.residualScaleMm = metersToMillimetersUnsigned(result.residual_scale_m);
+    if (result.robust_pass_used) {
+        outStats.flags |= kEstimatorDiagFlagRobustPass;
+    }
+    if (result.pair_selection_used) {
+        outStats.flags |= kEstimatorDiagFlagPairSelection;
+    }
+    if (outStats.diagLevel < kEstimatorDiagRows || rows == nullptr) {
+        return;
+    }
+
+    const uint8_t diagCount = std::min<uint8_t>(result.selected_rows, kEstimatorSelectedDiagCapacity);
+    outStats.selectedDiagCount = diagCount;
+    for (uint8_t i = 0; i < diagCount; i++) {
+        const uint8_t sourceIndex = result.selected_indices[i];
+        const tdoa_estimator::RobustTdoaRow& row = rows[sourceIndex];
+        EstimatorSelectedRowStats& dst = outStats.selected[i];
+        dst.anchorA = row.anchor_a;
+        dst.anchorB = row.anchor_b;
+        dst.residualMm = rtls::protocol::MetersToMillimeters(
+            static_cast<float>(result.residuals[sourceIndex]));
+        dst.baseWeightQ8 = weightToQ8(result.base_weights[sourceIndex]);
+        dst.finalWeightQ8 = weightToQ8(result.final_weights[sourceIndex]);
+    }
+}
+
 static void estimatorProcess() {
     static tdoa_estimator::PosMatrix anchors_left;
     static tdoa_estimator::PosMatrix anchors_right;
     static tdoa_estimator::DynVector tdoas;
+    static tdoa_estimator::RobustTdoaRow robust_rows[kNumPairs];
     static tdoa_estimator::PosVector3D last_position = tdoa_estimator::PosVector3D::Zero();
     static bool first_estimation = true;
     static bool last_use_2d = true;
+    static uint8_t last_3d_estimator_mode = kEstimatorModeRobust;
     static constexpr tdoa_estimator::Scalar ASSUMED_TAG_Z = 0.0f;
     static constexpr int NUM_ITERATIONS_2D = 5;
     static constexpr int NUM_ITERATIONS_3D = 10;
@@ -1129,15 +1646,28 @@ static void estimatorProcess() {
     // bookkeeping still runs during quiet periods).
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kEstimatorWatchdogMs));
 
-    const bool USE_2D_ESTIMATOR = (Front::uwbLittleFSFront.GetParams().use2DEstimator != 0);
+    const auto& currentParams = Front::uwbLittleFSFront.GetParams();
+    const bool USE_2D_ESTIMATOR = (currentParams.use2DEstimator != 0);
+    const uint8_t runtimeEstimatorMode = sanitizeEstimatorMode(currentParams.tdoaEstimatorMode);
+    const bool useLegacy3DMode = !USE_2D_ESTIMATOR && runtimeEstimatorMode == kEstimatorModeLegacy;
+    const bool useRobust3DGates = !USE_2D_ESTIMATOR && !useLegacy3DMode;
     const size_t min_measurements = USE_2D_ESTIMATOR
         ? kMinMeasurementsForNotify
-        : kMin3DMeasurementsForSolve;
+        : (useLegacy3DMode ? kLegacy3DMeasurementsForSolve : kRobust3DMeasurementsForSolve);
+    const uint8_t min_unique_anchors = USE_2D_ESTIMATOR
+        ? 0
+        : (useLegacy3DMode ? kLegacy3DUniqueAnchorsForSolve : kRobust3DUniqueAnchorsForSolve);
     if (USE_2D_ESTIMATOR != last_use_2d) {
         first_estimation = true;
         last_use_2d = USE_2D_ESTIMATOR;
         LOG_INFO("Estimator mode changed to %s - resetting warm-start",
                  USE_2D_ESTIMATOR ? "2D" : "3D");
+    }
+    if (!USE_2D_ESTIMATOR && runtimeEstimatorMode != last_3d_estimator_mode) {
+        first_estimation = true;
+        last_3d_estimator_mode = runtimeEstimatorMode;
+        LOG_INFO("3D estimator runtime mode changed to %u - resetting warm-start",
+                 static_cast<unsigned int>(runtimeEstimatorMode));
     }
 
     if (s_estimatorReinitRequested.exchange(false, std::memory_order_relaxed)) {
@@ -1174,11 +1704,13 @@ static void estimatorProcess() {
     bool have_enough = false;
     size_t copy_count = 0;
     size_t measurement_count_for_stats = 0;
+    uint64_t snapshot_now_us = 0;
     PairSlot snapshot[kNumPairs];
     etl::array<UWBAnchorParam, kNumAnchors> anchor_snapshot = {};
 
     if (xSemaphoreTake(measurements_mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
         const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+        snapshot_now_us = now_us;
         const tdoa::MeasurementSnapshotResult snapshotResult =
             tdoa::SnapshotFreshMeasurements(pair_slots,
                                              configured_anchor_ids,
@@ -1187,7 +1719,7 @@ static void estimatorProcess() {
                                              min_measurements,
                                              snapshot,
                                              kNumPairs,
-                                             USE_2D_ESTIMATOR ? 0 : kMin3DUniqueAnchorsForSolve,
+                                             min_unique_anchors,
                                              USE_2D_ESTIMATOR ? 0 : kMax3DBatchSpanUs);
 
         have_enough = snapshotResult.haveEnough;
@@ -1234,6 +1766,23 @@ static void estimatorProcess() {
             // "right - left" convention with right=b, left=a). The solver's
             // residual is d(L) - d(R) - tdoas(i) with L=a, R=b, so flip sign.
             tdoas(i) = -static_cast<tdoa_estimator::Scalar>(s.tdoa);
+
+            if (!USE_2D_ESTIMATOR) {
+                tdoa_estimator::RobustTdoaRow& row = robust_rows[i];
+                row.anchor_a = s.anchor_a;
+                row.anchor_b = s.anchor_b;
+                row.anchor_a_pos = anchors_left.row(i).transpose();
+                row.anchor_b_pos = anchors_right.row(i).transpose();
+                row.tdoa = tdoas(i);
+                const uint64_t age_us = snapshot_now_us >= s.timestamp_us
+                    ? snapshot_now_us - s.timestamp_us
+                    : 0;
+                row.age_us = age_us > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(age_us);
+                row.nominal_sigma_m = std::isfinite(s.sigma_m) && s.sigma_m > 0.0f
+                    ? static_cast<tdoa_estimator::Scalar>(s.sigma_m)
+                    : static_cast<tdoa_estimator::Scalar>(0.15f);
+                row.health = static_cast<tdoa_estimator::Scalar>(1.0f);
+            }
         }
 
         if (first_estimation) {
@@ -1275,7 +1824,7 @@ static void estimatorProcess() {
         tdoa_estimator::PosVector3D current_estimate_3d = last_position; // Use last state as starting point
         bool is_valid_estimate = false;
         float solution_rmse = 0.0f;
-        int solver_iterations = 0;
+        EstimatorSolveStats solveStats;
 
         // Covariance to pass to App layer
         std::optional<std::array<float, 6>> position_covariance = std::nullopt;
@@ -1284,6 +1833,28 @@ static void estimatorProcess() {
         const auto& uwbParams = Front::uwbLittleFSFront.GetParams();
         const tdoa_estimator::Scalar rmseThreshold = static_cast<tdoa_estimator::Scalar>(uwbParams.rmseThreshold);
         const bool enableCovMatrix = uwbParams.enableCovMatrix != 0;
+        const uint8_t estimatorDiagLevel = sanitizeEstimatorDiag(uwbParams.tdoaEstimatorDiag);
+        solveStats.mode = USE_2D_ESTIMATOR ? kEstimatorMode2D : runtimeEstimatorMode;
+        solveStats.diagLevel = estimatorDiagLevel;
+        solveStats.inputRows = clampToU8(copy_count);
+        solveStats.selectedRows = clampToU8(copy_count);
+        if (useRobust3DGates) {
+            const EstimatorGeometryStats geometryStats =
+                evaluate3DGeometry(snapshot, copy_count, anchor_snapshot, current_estimate_3d);
+            solveStats.uniqueAnchors = geometryStats.uniqueAnchors;
+            if (!is3DGeometryAcceptable(geometryStats)) {
+                solveStats.xMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(0)));
+                solveStats.yMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(1)));
+                solveStats.zMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(2)));
+                recordEstimatorSolveStats(solveStats);
+                recordEstimatorRejected(false, false, true, copy_count);
+#if TDOA_STATS_LOGGING == ENABLE
+                stats_samples_rejected++;
+                stats_reject_insufficient++;
+#endif
+                return;
+            }
+        }
 
         if (USE_2D_ESTIMATOR) {
             // Prepare inputs for 2D estimator
@@ -1293,9 +1864,7 @@ static void estimatorProcess() {
 
             // Run 2D Newton-Raphson — bracketed for stats. Brackets are no-ops
             // when stats logging is disabled.
-#if TDOA_STATS_LOGGING == ENABLE
             uint64_t solve_start_us = static_cast<uint64_t>(esp_timer_get_time());
-#endif
             tdoa_estimator::SolverResult2D result = tdoa_estimator::newtonRaphson2D(
                 anchors_left,
                 anchors_right,
@@ -1306,17 +1875,17 @@ static void estimatorProcess() {
                 1e-3f,  // convergenceThreshold
                 rmseThreshold
             );
+            uint32_t solve_us = elapsedUs(solve_start_us);
+            solveStats.solveUs = solve_us;
+            solveStats.iterations = clampToU8(static_cast<size_t>(result.iterations));
+            solveStats.rmseMm = metersToMillimetersUnsigned(result.rmse);
 #if TDOA_STATS_LOGGING == ENABLE
-            uint32_t solve_us = static_cast<uint32_t>(
-                static_cast<uint64_t>(esp_timer_get_time()) - solve_start_us);
             stats_solve_count++;
             stats_solve_sum_us += solve_us;
             stats_iter_sum += static_cast<uint32_t>(result.iterations);
             if (solve_us < stats_solve_min_us) stats_solve_min_us = solve_us;
             if (solve_us > stats_solve_max_us) stats_solve_max_us = solve_us;
 #endif
-            solver_iterations = result.iterations;
-
             if (result.valid && result.converged) {
                 // Update only X and Y components of the 3D state vector
                 current_estimate_3d.head<2>() = result.position;
@@ -1339,47 +1908,146 @@ static void estimatorProcess() {
             // Use the full 3D vector as the initial guess
             tdoa_estimator::PosVector3D initial_guess_3d = current_estimate_3d;
 
-#if TDOA_STATS_LOGGING == ENABLE
-            uint64_t solve_start_us = static_cast<uint64_t>(esp_timer_get_time());
-#endif
-            tdoa_estimator::SolverResult result = tdoa_estimator::newtonRaphson(
-                anchors_left,
-                anchors_right,
-                tdoas,
-                initial_guess_3d,
-                NUM_ITERATIONS_3D,
-                1e-3f,  // convergenceThreshold
-                rmseThreshold
-            );
-#if TDOA_STATS_LOGGING == ENABLE
-            uint32_t solve_us = static_cast<uint32_t>(
-                static_cast<uint64_t>(esp_timer_get_time()) - solve_start_us);
-            stats_solve_count++;
-            stats_solve_sum_us += solve_us;
-            stats_iter_sum += static_cast<uint32_t>(result.iterations);
-            if (solve_us < stats_solve_min_us) stats_solve_min_us = solve_us;
-            if (solve_us > stats_solve_max_us) stats_solve_max_us = solve_us;
-#endif
-            solver_iterations = result.iterations;
-
-            if (result.valid
-                && result.converged
-                && result.covarianceValid
-                && is3DCovarianceAcceptable(result.positionCovariance)) {
-                // Update the full 3D state vector
+            auto accept3DResult = [&](const tdoa_estimator::SolverResult& result) {
                 current_estimate_3d = result.position;
                 is_valid_estimate = true;
-                solution_rmse = result.rmse;
-
-                // Extract covariance if valid and enabled
-                if (enableCovMatrix && result.covarianceValid) {
+                solution_rmse = static_cast<float>(result.rmse);
+                if (!is3DCovarianceUsable(result)) {
+                    solveStats.flags |= kEstimatorDiagFlagCovarianceInvalid;
+                }
+                if (enableCovMatrix && is3DCovarianceUsable(result)) {
                     position_covariance = pack3DCovariance(result.positionCovariance);
+                }
+            };
+
+            const auto runLegacy3D = [&]() {
+                return tdoa_estimator::newtonRaphson(
+                    anchors_left,
+                    anchors_right,
+                    tdoas,
+                    initial_guess_3d,
+                    NUM_ITERATIONS_3D,
+                    1e-3f,
+                    rmseThreshold);
+            };
+
+            const tdoa_estimator::RobustEstimatorOptions robustOptions =
+                makeRobustOptions(rmseThreshold, NUM_ITERATIONS_3D);
+
+            if (runtimeEstimatorMode == kEstimatorModeLegacy) {
+                const uint64_t solve_start_us = static_cast<uint64_t>(esp_timer_get_time());
+                const tdoa_estimator::SolverResult result = runLegacy3D();
+                const uint32_t solve_us = elapsedUs(solve_start_us);
+                solveStats.solveUs = solve_us;
+                solveStats.legacySolveUs = solve_us;
+                solveStats.iterations = clampToU8(static_cast<size_t>(result.iterations));
+                solveStats.rmseMm = metersToMillimetersUnsigned(result.rmse);
+
+#if TDOA_STATS_LOGGING == ENABLE
+                stats_solve_count++;
+                stats_solve_sum_us += solve_us;
+                stats_iter_sum += static_cast<uint32_t>(result.iterations);
+                if (solve_us < stats_solve_min_us) stats_solve_min_us = solve_us;
+                if (solve_us > stats_solve_max_us) stats_solve_max_us = solve_us;
+#endif
+                if (is3DResultAcceptable(result, enableCovMatrix)) {
+                    accept3DResult(result);
+                }
+            } else if (runtimeEstimatorMode == kEstimatorModeCompare) {
+                solveStats.flags |= kEstimatorDiagFlagCompareMode;
+                const uint64_t compare_start_us = static_cast<uint64_t>(esp_timer_get_time());
+
+                const uint64_t legacy_start_us = static_cast<uint64_t>(esp_timer_get_time());
+                const tdoa_estimator::SolverResult legacyResult = runLegacy3D();
+                const uint32_t legacy_us = elapsedUs(legacy_start_us);
+
+                const uint64_t robust_start_us = static_cast<uint64_t>(esp_timer_get_time());
+                const tdoa_estimator::RobustEstimatorResult robustResult =
+                    tdoa_estimator::estimateRobust3D(
+                        robust_rows,
+                        copy_count,
+                        initial_guess_3d,
+                        robustOptions);
+                const uint32_t robust_us = elapsedUs(robust_start_us);
+
+                const uint32_t total_us = elapsedUs(compare_start_us);
+                solveStats.solveUs = total_us;
+                solveStats.legacySolveUs = legacy_us;
+                solveStats.robustSolveUs = robust_us;
+                solveStats.legacyRmseMm = metersToMillimetersUnsigned(legacyResult.rmse);
+                solveStats.robustRmseMm = metersToMillimetersUnsigned(robustResult.solve.rmse);
+                copyRobustDiagnostics(solveStats, robustResult, robust_rows);
+
+                const bool legacyOk = is3DResultAcceptable(legacyResult, enableCovMatrix);
+                const bool robustOk = is3DResultAcceptable(robustResult.solve, enableCovMatrix);
+                if (!robustOk) {
+                    solveStats.flags |= kEstimatorDiagFlagRobustInvalid;
+                }
+                if (legacyOk && robustOk) {
+                    solveStats.compareDeltaMm = positionDeltaMm(legacyResult.position, robustResult.solve.position);
+                }
+
+                if (robustOk) {
+                    solveStats.iterations = clampToU8(static_cast<size_t>(robustResult.solve.iterations));
+                    solveStats.rmseMm = metersToMillimetersUnsigned(robustResult.solve.rmse);
+                    accept3DResult(robustResult.solve);
+                } else if (legacyOk) {
+                    solveStats.flags |= kEstimatorDiagFlagFallbackLegacy;
+                    solveStats.iterations = clampToU8(static_cast<size_t>(legacyResult.iterations));
+                    solveStats.rmseMm = metersToMillimetersUnsigned(legacyResult.rmse);
+                    accept3DResult(legacyResult);
+                } else {
+                    solveStats.iterations = clampToU8(static_cast<size_t>(robustResult.solve.iterations));
+                    solveStats.rmseMm = metersToMillimetersUnsigned(robustResult.solve.rmse);
+                }
+
+#if TDOA_STATS_LOGGING == ENABLE
+                stats_solve_count++;
+                stats_solve_sum_us += total_us;
+                stats_iter_sum += static_cast<uint32_t>(solveStats.iterations);
+                if (total_us < stats_solve_min_us) stats_solve_min_us = total_us;
+                if (total_us > stats_solve_max_us) stats_solve_max_us = total_us;
+#endif
+            } else {
+                const uint64_t solve_start_us = static_cast<uint64_t>(esp_timer_get_time());
+                const tdoa_estimator::RobustEstimatorResult result =
+                    tdoa_estimator::estimateRobust3D(
+                        robust_rows,
+                        copy_count,
+                        initial_guess_3d,
+                        robustOptions);
+                const uint32_t solve_us = elapsedUs(solve_start_us);
+                solveStats.solveUs = solve_us;
+                solveStats.robustSolveUs = solve_us;
+                solveStats.iterations = clampToU8(static_cast<size_t>(result.solve.iterations));
+                solveStats.rmseMm = metersToMillimetersUnsigned(result.solve.rmse);
+                copyRobustDiagnostics(solveStats, result, robust_rows);
+
+#if TDOA_STATS_LOGGING == ENABLE
+                stats_solve_count++;
+                stats_solve_sum_us += solve_us;
+                stats_iter_sum += static_cast<uint32_t>(result.solve.iterations);
+                if (solve_us < stats_solve_min_us) stats_solve_min_us = solve_us;
+                if (solve_us > stats_solve_max_us) stats_solve_max_us = solve_us;
+#endif
+                if (is3DResultAcceptable(result.solve, enableCovMatrix)) {
+                    accept3DResult(result.solve);
                 }
             }
         }
 
         // --- Send Data to Application ---
         bool has_nan = current_estimate_3d.hasNaN();
+        if (is_valid_estimate && !has_nan) {
+            solveStats.flags |= kEstimatorDiagFlagAccepted;
+        }
+        if (position_covariance.has_value()) {
+            solveStats.flags |= kEstimatorDiagFlagCovarianceSent;
+        }
+        solveStats.xMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(0)));
+        solveStats.yMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(1)));
+        solveStats.zMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(2)));
+        recordEstimatorSolveStats(solveStats);
         if (is_valid_estimate && !has_nan) { // Only send if the estimate is valid
             recordEstimatorAccepted(current_estimate_3d(0),
                                     current_estimate_3d(1),

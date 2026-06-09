@@ -149,6 +149,61 @@ namespace tdoa_estimator {
             return J.colwise().squaredNorm().sum();
         }
 
+        inline Scalar safeWeight(const DynVector& weights, int index)
+        {
+            if (index < 0 || index >= weights.size()) {
+                return Scalar(1);
+            }
+            const Scalar weight = weights(index);
+            return std::isfinite(static_cast<double>(weight)) && weight > Scalar(0)
+                ? weight
+                : Scalar(0);
+        }
+
+        inline Scalar weightedSquaredNorm(const DynVector& residuals, const DynVector& weights)
+        {
+            Scalar sse = Scalar(0);
+            for (int i = 0; i < residuals.size(); i++) {
+                const Scalar r = residuals(i);
+                sse += safeWeight(weights, i) * r * r;
+            }
+            return sse;
+        }
+
+        inline Scalar weightSum(const DynVector& weights)
+        {
+            Scalar sum = Scalar(0);
+            for (int i = 0; i < weights.size(); i++) {
+                sum += safeWeight(weights, i);
+            }
+            return sum;
+        }
+
+        template <int Cols, typename JType, typename JaugType, typename RaugType, typename DeltaType>
+        inline void solveWeightedLMStep(const JType& J,
+                                        const DynVector& residuals,
+                                        const DynVector& weights,
+                                        Scalar lambda,
+                                        JaugType& jaug,
+                                        RaugType& raug,
+                                        DeltaType& delta)
+        {
+            const int n = static_cast<int>(J.rows());
+            jaug.resize(n + Cols, Cols);
+            raug.resize(n + Cols);
+
+            for (int i = 0; i < n; i++) {
+                const Scalar scale = std::sqrt(safeWeight(weights, i));
+                jaug.row(i) = J.row(i) * scale;
+                raug(i) = residuals(i) * scale;
+            }
+            jaug.template bottomRows(Cols) = Eigen::Matrix<Scalar, Cols, Cols>::Identity()
+                                             * std::sqrt(lambda);
+            raug.tail(Cols).setZero();
+
+            delta = jaug.householderQr().solve(raug);
+        }
+
         bool matrixObservable3D(const CovMatrix3D& matrix, double trace)
         {
             if (trace < 1e-10) {
@@ -206,6 +261,54 @@ namespace tdoa_estimator {
                 JtJ(0, 0) += j0 * j0; JtJ(0, 1) += j0 * j1; JtJ(0, 2) += j0 * j2;
                 JtJ(1, 1) += j1 * j1; JtJ(1, 2) += j1 * j2;
                 JtJ(2, 2) += j2 * j2;
+            }
+            JtJ(1, 0) = JtJ(0, 1);
+            JtJ(2, 0) = JtJ(0, 2);
+            JtJ(2, 1) = JtJ(1, 2);
+
+            double trace = JtJ.trace();
+            double minDiag = JtJ.diagonal().minCoeff();
+
+            if (trace < 1e-10) {
+                outCovariance = CovMatrix3D::Identity() * 100.0;
+                return false;
+            }
+
+            if (!matrixObservable3D(JtJ, trace)) {
+                outCovariance = CovMatrix3D::Identity() * 100.0;
+                return false;
+            }
+
+            if (minDiag < kRegularizationThreshold * trace) {
+                JtJ += (kRegularizationFactor * trace) * CovMatrix3D::Identity();
+            }
+
+            Eigen::LDLT<CovMatrix3D> ldlt(JtJ);
+            if (ldlt.info() != Eigen::Success) {
+                outCovariance = CovMatrix3D::Identity() * 100.0;
+                return false;
+            }
+
+            outCovariance = ldlt.solve(CovMatrix3D::Identity()) * measurementVariance;
+            outCovariance = (outCovariance + outCovariance.transpose()) / 2.0;
+            return true;
+        }
+
+        bool computePositionCovariance3DWeighted(const PosMatrix& J,
+                                                 const DynVector& weights,
+                                                 double measurementVariance,
+                                                 CovMatrix3D& outCovariance)
+        {
+            const int n = static_cast<int>(J.rows());
+            CovMatrix3D JtJ = CovMatrix3D::Zero();
+            for (int i = 0; i < n; ++i) {
+                const double w = static_cast<double>(safeWeight(weights, i));
+                double j0 = static_cast<double>(J(i, 0));
+                double j1 = static_cast<double>(J(i, 1));
+                double j2 = static_cast<double>(J(i, 2));
+                JtJ(0, 0) += w * j0 * j0; JtJ(0, 1) += w * j0 * j1; JtJ(0, 2) += w * j0 * j2;
+                JtJ(1, 1) += w * j1 * j1; JtJ(1, 2) += w * j1 * j2;
+                JtJ(2, 2) += w * j2 * j2;
             }
             JtJ(1, 0) = JtJ(0, 1);
             JtJ(2, 0) = JtJ(0, 2);
@@ -393,12 +496,130 @@ namespace tdoa_estimator {
 
             result.covarianceValid = computePositionCovariance3D(
                 ctx.jacobian, measurementVariance, result.positionCovariance);
-            if (!result.covarianceValid) {
-                result.valid = false;
-            }
         }
 
         return result;
+    }
+
+    SolverResult newtonRaphsonWeighted(const PosMatrix& L,
+                                       const PosMatrix& R,
+                                       const DynVector& doas,
+                                       const DynVector& weights,
+                                       PosVector3D initialPos,
+                                       int maxIterations,
+                                       Scalar convergenceThreshold,
+                                       Scalar rmseThreshold)
+    {
+        SolverResult result;
+        result.position = initialPos;
+        result.converged = false;
+        result.valid = true;
+        result.iterations = 0;
+        result.rmse = std::numeric_limits<Scalar>::infinity();
+        result.covarianceValid = false;
+        result.positionCovariance = CovMatrix3D::Identity();
+
+        if (weights.size() != doas.size() || !anchorLayoutObservable3D(L, R)) {
+            result.valid = false;
+            return result;
+        }
+
+        SolverContext3D ctx;
+
+        PosVector3D pos = initialPos;
+        computeResidualsAndDistances3D(L, R, doas, pos, ctx.residuals, ctx.distancesL, ctx.distancesR);
+        Scalar prevSse = weightedSquaredNorm(ctx.residuals, weights);
+        const Scalar totalWeight = weightSum(weights);
+        if (totalWeight <= Scalar(0)) {
+            result.valid = false;
+            return result;
+        }
+        const Scalar rmse_convergence_sse =
+            kResidualConvergenceThreshold * kResidualConvergenceThreshold * totalWeight;
+        if (prevSse <= rmse_convergence_sse) {
+            result.converged = true;
+        }
+
+        buildJacobian3D(L, R, pos, ctx.distancesL, ctx.distancesR, ctx.jacobian);
+        Scalar lambda = kLMInitialFactor * trace3(ctx.jacobian) / Scalar(3);
+        if (lambda < kLMMinLambda) lambda = kLMMinLambda;
+
+        for (int iter = 0; !result.converged && iter < maxIterations; ++iter) {
+            result.iterations++;
+
+            buildJacobian3D(L, R, pos, ctx.distancesL, ctx.distancesR, ctx.jacobian);
+
+            PosVector3D delta;
+            solveWeightedLMStep<3>(ctx.jacobian, ctx.residuals, weights, lambda, ctx.jaug, ctx.raug, delta);
+
+            PosVector3D posTrial = pos - delta;
+
+            DynVector trialResiduals;
+            DynVector trialDL, trialDR;
+            computeResidualsAndDistances3D(L, R, doas, posTrial, trialResiduals, trialDL, trialDR);
+            Scalar trialSse = weightedSquaredNorm(trialResiduals, weights);
+
+            if (trialSse < prevSse) {
+                pos = posTrial;
+                ctx.residuals = trialResiduals;
+                ctx.distancesL = trialDL;
+                ctx.distancesR = trialDR;
+
+                Scalar stepNorm = delta.norm();
+                Scalar relImprove = (prevSse > Scalar(0))
+                    ? (prevSse - trialSse) / prevSse : Scalar(0);
+                prevSse = trialSse;
+
+                lambda *= kLMShrinkFactor;
+                if (lambda < kLMMinLambda) lambda = kLMMinLambda;
+
+                if (stepNorm < convergenceThreshold || relImprove < convergenceThreshold) {
+                    result.converged = true;
+                    break;
+                }
+            } else {
+                lambda *= kLMGrowFactor;
+                if (lambda > kLMMaxLambda) {
+                    break;
+                }
+            }
+        }
+
+        result.position = pos;
+        result.rmse = std::sqrt(prevSse / totalWeight);
+        if (result.rmse > rmseThreshold) {
+            result.valid = false;
+        }
+        if (!result.converged) {
+            result.valid = false;
+        }
+
+        if (result.valid && result.converged) {
+            computeResidualsAndDistances3D(L, R, doas, pos, ctx.residuals, ctx.distancesL, ctx.distancesR);
+            buildJacobian3D(L, R, pos, ctx.distancesL, ctx.distancesR, ctx.jacobian);
+
+            const int stateDim = 3;
+            double weightedSse = static_cast<double>(weightedSquaredNorm(ctx.residuals, weights));
+            double dof = std::max(1.0, static_cast<double>(totalWeight) - static_cast<double>(stateDim));
+            double measurementVariance = weightedSse / dof;
+            measurementVariance = std::max(measurementVariance, kMinMeasurementVariance);
+
+            result.covarianceValid = computePositionCovariance3DWeighted(
+                ctx.jacobian, weights, measurementVariance, result.positionCovariance);
+        }
+
+        return result;
+    }
+
+    void computeResiduals3D(const PosMatrix& L,
+                            const PosMatrix& R,
+                            const DynVector& doas,
+                            const PosVector3D& position,
+                            DynVector& residuals)
+    {
+        DynVector distancesL;
+        DynVector distancesR;
+        computeResidualsAndDistances3D(L, R, doas, position, residuals, distancesL, distancesR);
     }
 
     // ----- 2D solver -----

@@ -115,6 +115,8 @@ struct UWBParams {
     uint8_t enableCovMatrix = 0;    // 0=disabled, 1=enabled (send covariance to ArduPilot)
     float rmseThreshold = 0.8f;     // RMSE threshold for position validity (meters)
     uint8_t use2DEstimator = 1;     // 0=3D Newton-Raphson, 1=2D (XY-only with fixed Z, default)
+    uint8_t tdoaEstimatorMode = 1;  // 0=legacy 3D, 1=robust 3D (default), 2=compare/debug
+    uint8_t tdoaEstimatorDiag = 0;  // 0=off, 1=summary, 2=include selected-row diagnostics
     // UWB Radio settings (TDoA mode only)
     uint8_t channel = 2;            // UWB channel (1-7), default 2
     uint8_t dwMode = 0;             // DW1000 mode index (0=SHORTDATA_FAST_ACCURACY, see getModeByIndex)
