@@ -104,9 +104,13 @@ static constexpr uint8_t kDynamicAnchorCount3D = 8;
 
 using PairSlot = tdoa::MeasurementSlot;
 
-static constexpr size_t kMin3DMeasurementsForSolve = 5;
-static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 4;
+static constexpr size_t kMin3DMeasurementsForSolve = 7;
+static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 6;
+static constexpr uint8_t kMin3DPlaneAnchorsPerSide = 2;
 static constexpr uint64_t kMax3DBatchSpanUs = 120000;
+static constexpr tdoa_estimator::Scalar kMin3DPlaneSeparationM = 0.5f;
+static constexpr tdoa_estimator::Scalar kMin3DGeometryZInformation = 0.05f;
+static constexpr tdoa_estimator::Scalar kMin3DGeometryDeterminantRatio = 3.0e-4f;
 static constexpr tdoa_estimator::Scalar kMax3DPositionVarianceM2 = 9.0f;
 static constexpr uint8_t kEstimatorModeLegacy = 0;
 static constexpr uint8_t kEstimatorModeRobust = 1;
@@ -1611,6 +1615,119 @@ static uint32_t positionDeltaMm(const tdoa_estimator::PosVector3D& a,
     return metersToMillimetersUnsigned((a - b).norm());
 }
 
+struct EstimatorGeometryStats {
+    uint8_t uniqueAnchors = 0;
+    uint8_t lowPlaneAnchors = 0;
+    uint8_t highPlaneAnchors = 0;
+    tdoa_estimator::Scalar zInformation = 0.0f;
+    tdoa_estimator::Scalar determinantRatio = 0.0f;
+};
+
+static tdoa_estimator::PosVector3D anchorPositionVector(const UWBAnchorParam& anchor)
+{
+    tdoa_estimator::PosVector3D position;
+    position << static_cast<tdoa_estimator::Scalar>(anchor.x),
+                static_cast<tdoa_estimator::Scalar>(anchor.y),
+                static_cast<tdoa_estimator::Scalar>(anchor.z);
+    return position;
+}
+
+static EstimatorGeometryStats evaluate3DGeometry(const PairSlot* rows,
+                                                 size_t rowCount,
+                                                 const etl::array<UWBAnchorParam, kNumAnchors>& anchors,
+                                                 const tdoa_estimator::PosVector3D& referencePosition)
+{
+    EstimatorGeometryStats stats;
+    if (rows == nullptr || rowCount == 0) {
+        return stats;
+    }
+
+    bool anchorSeen[kNumAnchors] = {};
+    tdoa_estimator::Scalar minZ = std::numeric_limits<tdoa_estimator::Scalar>::max();
+    tdoa_estimator::Scalar maxZ = -std::numeric_limits<tdoa_estimator::Scalar>::max();
+    Eigen::Matrix<tdoa_estimator::Scalar, 3, 3> information =
+        Eigen::Matrix<tdoa_estimator::Scalar, 3, 3>::Zero();
+
+    for (size_t i = 0; i < rowCount; i++) {
+        const PairSlot& row = rows[i];
+        if (row.anchor_a >= kNumAnchors || row.anchor_b >= kNumAnchors) {
+            continue;
+        }
+
+        if (!anchorSeen[row.anchor_a]) {
+            anchorSeen[row.anchor_a] = true;
+            stats.uniqueAnchors++;
+            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_a].z));
+            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_a].z));
+        }
+        if (!anchorSeen[row.anchor_b]) {
+            anchorSeen[row.anchor_b] = true;
+            stats.uniqueAnchors++;
+            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_b].z));
+            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_b].z));
+        }
+
+        const tdoa_estimator::PosVector3D anchorA = anchorPositionVector(anchors[row.anchor_a]);
+        const tdoa_estimator::PosVector3D anchorB = anchorPositionVector(anchors[row.anchor_b]);
+        tdoa_estimator::Scalar distanceA = (referencePosition - anchorA).norm();
+        tdoa_estimator::Scalar distanceB = (referencePosition - anchorB).norm();
+        if (distanceA < tdoa_estimator::Scalar(1.0e-4f)) {
+            distanceA = tdoa_estimator::Scalar(1.0e-4f);
+        }
+        if (distanceB < tdoa_estimator::Scalar(1.0e-4f)) {
+            distanceB = tdoa_estimator::Scalar(1.0e-4f);
+        }
+
+        const tdoa_estimator::PosVector3D gradient =
+            ((referencePosition - anchorA) / distanceA)
+            - ((referencePosition - anchorB) / distanceB);
+        information += gradient * gradient.transpose();
+    }
+
+    if (stats.uniqueAnchors == 0
+        || !std::isfinite(static_cast<double>(minZ))
+        || !std::isfinite(static_cast<double>(maxZ))) {
+        return stats;
+    }
+
+    const tdoa_estimator::Scalar planeSeparation = maxZ - minZ;
+    if (planeSeparation >= kMin3DPlaneSeparationM) {
+        const tdoa_estimator::Scalar midZ = (minZ + maxZ) * tdoa_estimator::Scalar(0.5f);
+        for (uint8_t i = 0; i < kNumAnchors; i++) {
+            if (!anchorSeen[i]) {
+                continue;
+            }
+            if (static_cast<tdoa_estimator::Scalar>(anchors[i].z) < midZ) {
+                stats.lowPlaneAnchors++;
+            } else {
+                stats.highPlaneAnchors++;
+            }
+        }
+    }
+
+    const tdoa_estimator::Scalar trace = information.trace();
+    if (trace > tdoa_estimator::Scalar(1.0e-6f)) {
+        const tdoa_estimator::Scalar determinant =
+            information(0, 0) * ((information(1, 1) * information(2, 2)) - (information(1, 2) * information(2, 1)))
+            - information(0, 1) * ((information(1, 0) * information(2, 2)) - (information(1, 2) * information(2, 0)))
+            + information(0, 2) * ((information(1, 0) * information(2, 1)) - (information(1, 1) * information(2, 0)));
+        if (std::isfinite(static_cast<double>(determinant)) && determinant > tdoa_estimator::Scalar(0)) {
+            stats.determinantRatio = determinant / (trace * trace * trace);
+        }
+    }
+    stats.zInformation = information(2, 2);
+    return stats;
+}
+
+static bool is3DGeometryAcceptable(const EstimatorGeometryStats& stats)
+{
+    return stats.uniqueAnchors >= kMin3DUniqueAnchorsForSolve
+        && stats.lowPlaneAnchors >= kMin3DPlaneAnchorsPerSide
+        && stats.highPlaneAnchors >= kMin3DPlaneAnchorsPerSide
+        && stats.zInformation >= kMin3DGeometryZInformation
+        && stats.determinantRatio >= kMin3DGeometryDeterminantRatio;
+}
+
 #ifdef TDOA_ESTIMATOR_JUMP_DIAG
 static void maybeRecordEstimatorJumpEvent(const EstimatorSolveStats& solveStats,
                                           const tdoa_estimator::PosVector3D& previousPosition,
@@ -1972,6 +2089,23 @@ static void estimatorProcess() {
         solveStats.diagLevel = estimatorDiagLevel;
         solveStats.inputRows = clampToU8(copy_count);
         solveStats.selectedRows = clampToU8(copy_count);
+        if (!USE_2D_ESTIMATOR) {
+            const EstimatorGeometryStats geometryStats =
+                evaluate3DGeometry(snapshot, copy_count, anchor_snapshot, current_estimate_3d);
+            solveStats.uniqueAnchors = geometryStats.uniqueAnchors;
+            if (!is3DGeometryAcceptable(geometryStats)) {
+                solveStats.xMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(0)));
+                solveStats.yMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(1)));
+                solveStats.zMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(2)));
+                recordEstimatorSolveStats(solveStats);
+                recordEstimatorRejected(false, false, true, copy_count);
+#if TDOA_STATS_LOGGING == ENABLE
+                stats_samples_rejected++;
+                stats_reject_insufficient++;
+#endif
+                return;
+            }
+        }
 
         if (USE_2D_ESTIMATOR) {
             // Prepare inputs for 2D estimator
