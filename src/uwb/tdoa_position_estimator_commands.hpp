@@ -11,7 +11,6 @@
 namespace TDoAPositionEstimatorCommands {
     String StatusJson();
     void AppendBinaryStatus(rtls::protocol::BinaryFrameBuilder<2048>& outFrame);
-    void AppendBinaryEvents(rtls::protocol::BinaryFrameBuilder<2048>& outFrame);
     void ResetStats();
 }
 

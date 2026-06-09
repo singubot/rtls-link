@@ -76,7 +76,6 @@
 -D USE_STATUS_LED_TASK          ; Status LED blink task (board-dependent)
 -D USE_RATE_STATISTICS          ; Position update rate tracking
 -D USE_RUNTIME_SUBSYSTEM_TOGGLES ; Runtime UWB/module toggles
--D TDOA_ESTIMATOR_JUMP_DIAG    ; Temporary robust-estimator jump event diagnostics
 
 ; -----------------------------------------------------------------------------
 ; PERFORMANCE

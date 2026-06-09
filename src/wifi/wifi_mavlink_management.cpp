@@ -94,7 +94,6 @@ const char* commandToString(uint16_t command, const char* name)
         case RTLS_COMMAND_TDOA_ANCHOR_MODEL_EXPORT: return "tdoa-anchor-model-export";
         case RTLS_COMMAND_TDOA_ESTIMATOR_STATS_RESET: return "tdoa-estimator-stats-reset";
         case RTLS_COMMAND_TDOA_ESTIMATOR_STATUS: return "tdoa-estimator-status";
-        case RTLS_COMMAND_TDOA_ESTIMATOR_EVENTS: return "tdoa-estimator-events";
         default:
             break;
     }
