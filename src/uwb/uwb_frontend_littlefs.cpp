@@ -101,6 +101,44 @@ bool isValidAnchorCountValue(const void* data)
     return true;
 }
 
+bool parseUint8ParamValue(const void* data, uint8_t& outValue)
+{
+    if (data == nullptr) {
+        return false;
+    }
+
+    uint32_t parsed = 0;
+    if (Utils::TransformStrToData(ParamType::UINT8,
+                                  static_cast<const char*>(data),
+                                  &parsed) != Utils::ErrorTransform::OK) {
+        return false;
+    }
+    if (parsed > UINT8_MAX) {
+        return false;
+    }
+
+    outValue = static_cast<uint8_t>(parsed);
+    return true;
+}
+
+bool isValidEstimatorModeValue(const void* data)
+{
+    uint8_t parsed = 0;
+    return parseUint8ParamValue(data, parsed) && parsed <= 2;
+}
+
+bool isValidEstimatorDiagValue(const void* data)
+{
+    uint8_t parsed = 0;
+    return parseUint8ParamValue(data, parsed) && parsed <= 2;
+}
+
+bool hasValidEstimatorRuntimeConfig(const UWBParams& params)
+{
+    return params.tdoaEstimatorMode <= 2
+        && params.tdoaEstimatorDiag <= 2;
+}
+
 bool parseUwbModeValue(const void* data, UWBMode& outMode)
 {
     if (data == nullptr) {
@@ -301,6 +339,11 @@ ErrorParam UWBLittleFSFrontend::LoadParams() {
     const UWBParams previousParams = m_Params;
     const ErrorParam result = LittleFSFrontend<UWBParams>::LoadParams();
     if (result == ErrorParam::OK) {
+        if (!hasValidEstimatorRuntimeConfig(m_Params)) {
+            LOG_ERROR("Rejected stored UWB params with invalid TDoA estimator runtime config");
+            m_Params = previousParams;
+            return ErrorParam::INVALID_DATA;
+        }
 #ifdef USE_RTLSLINK_BEACON_BACKEND
         if (!hasFiniteRtlslinkRuntimeConfig(m_Params)) {
             LOG_ERROR("Rejected stored UWB params with non-finite RTLSLink runtime config");
@@ -574,6 +617,14 @@ ErrorParam UWBLittleFSFrontend::SetParam(const char* name, const void* data, uin
             LOG_ERROR("Rejected UWB mode change; backend mode changes require reboot");
             return ErrorParam::INVALID_DATA;
         }
+    }
+    if (strcmp(name, "tdoaEstimatorMode") == 0 && !isValidEstimatorModeValue(data)) {
+        LOG_ERROR("Rejected invalid TDoA estimator mode (valid range 0-2)");
+        return ErrorParam::INVALID_DATA;
+    }
+    if (strcmp(name, "tdoaEstimatorDiag") == 0 && !isValidEstimatorDiagValue(data)) {
+        LOG_ERROR("Rejected invalid TDoA estimator diagnostics level (valid range 0-2)");
+        return ErrorParam::INVALID_DATA;
     }
 #ifdef USE_RTLSLINK_BEACON_BACKEND
     if (isRtlslinkRuntimeConfigParam(name) && !isFiniteRtlslinkRuntimeConfigValue(name, data)) {

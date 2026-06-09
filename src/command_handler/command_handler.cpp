@@ -22,6 +22,7 @@
 #endif
 #ifdef USE_UWB_MODE_TDOA_TAG
 #include "uwb/tdoa_anchor_model_commands.hpp"
+#include "uwb/tdoa_position_estimator_commands.hpp"
 #endif
 #ifdef USE_CONSOLE_CONFIG_MGMT
 #include "config_manager/config_manager.hpp"
@@ -236,6 +237,7 @@ static void tdoaAnchorModelCollectStatusCallback(cmd* c);
 static void tdoaAnchorModelLockCallback(cmd* c);
 static void tdoaAnchorModelStatusCallback(cmd* c);
 static void tdoaAnchorModelExportCallback(cmd* c);
+static void tdoaEstimatorStatusCallback(cmd* c);
 static void tdoaEstimatorStatsResetCallback(cmd* c);
 #endif
 
@@ -411,6 +413,7 @@ void CommandHandler::Init()
     simpleCLI.addCommand("tdoa-anchor-model-lock", tdoaAnchorModelLockCallback);
     simpleCLI.addCommand("tdoa-anchor-model-status", tdoaAnchorModelStatusCallback);
     simpleCLI.addCommand("tdoa-anchor-model-export", tdoaAnchorModelExportCallback);
+    simpleCLI.addCommand("tdoa-estimator-status", tdoaEstimatorStatusCallback);
     simpleCLI.addCommand("tdoa-estimator-stats-reset", tdoaEstimatorStatsResetCallback);
 #endif
 
@@ -481,6 +484,7 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
         || commandStartsWith(command, "tdoa-anchor-model-lock")
         || commandStartsWith(command, "tdoa-anchor-model-status")
         || commandStartsWith(command, "tdoa-anchor-model-export")
+        || commandStartsWith(command, "tdoa-estimator-status")
         || commandStartsWith(command, "tdoa-estimator-stats-reset");
 
     if (!knownBinaryCommand) {
@@ -698,11 +702,21 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
         return true;
     }
 
+    if (commandStartsWith(command, "tdoa-estimator-status")) {
+        if (!IsTagTdoaMode()) {
+            appendAck(outFrame, rtls::protocol::StatusCode::InvalidMode, "Not in TAG_TDOA mode");
+        } else {
+            TDoAPositionEstimatorCommands::AppendBinaryStatus(outFrame);
+        }
+        xSemaphoreGive(commandQueueMutex);
+        return true;
+    }
+
     if (commandStartsWith(command, "tdoa-estimator-stats-reset")) {
         if (!IsTagTdoaMode()) {
             appendAck(outFrame, rtls::protocol::StatusCode::InvalidMode, "Not in TAG_TDOA mode");
         } else {
-            TDoAAnchorModelCommands::ResetEstimatorStats();
+            TDoAPositionEstimatorCommands::ResetStats();
             appendAck(outFrame, rtls::protocol::StatusCode::Ok, "OK");
         }
         xSemaphoreGive(commandQueueMutex);
@@ -1027,6 +1041,16 @@ static void tdoaAnchorModelExportCallback(cmd* c)
     commandResult = WrapJson(TDoAAnchorModelCommands::ExportJson(), "model", true);
 }
 
+static void tdoaEstimatorStatusCallback(cmd* c)
+{
+    (void)c;
+    if (!IsTagTdoaMode()) {
+        commandResult = "{\"success\":false,\"error\":\"Not in TAG_TDOA mode\"}";
+        return;
+    }
+    commandResult = TDoAPositionEstimatorCommands::StatusJson();
+}
+
 static void tdoaEstimatorStatsResetCallback(cmd* c)
 {
     (void)c;
@@ -1034,7 +1058,7 @@ static void tdoaEstimatorStatsResetCallback(cmd* c)
         commandResult = "{\"success\":false,\"error\":\"Not in TAG_TDOA mode\"}";
         return;
     }
-    TDoAAnchorModelCommands::ResetEstimatorStats();
+    TDoAPositionEstimatorCommands::ResetStats();
     commandResult = "{\"success\":true}";
 }
 #endif // USE_UWB_MODE_TDOA_TAG

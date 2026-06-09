@@ -66,6 +66,21 @@ namespace tdoa_estimator {
                                Scalar convergenceThreshold = 1e-3f,
                                Scalar rmseThreshold = 0.8f);
 
+    SolverResult newtonRaphsonWeighted(const PosMatrix& anchorPositionsLeft,
+                                       const PosMatrix& anchorPositionsRight,
+                                       const DynVector& doas,
+                                       const DynVector& weights,
+                                       PosVector3D initialPos,
+                                       int maxIterations = 5,
+                                       Scalar convergenceThreshold = 1e-3f,
+                                       Scalar rmseThreshold = 0.8f);
+
+    void computeResiduals3D(const PosMatrix& anchorPositionsLeft,
+                            const PosMatrix& anchorPositionsRight,
+                            const DynVector& doas,
+                            const PosVector3D& position,
+                            DynVector& residuals);
+
     // Main Newton-Raphson function (2D) - solves XY with Z fixed.
     SolverResult2D newtonRaphson2D(const PosMatrix& anchorPositionsLeft,
                                    const PosMatrix& anchorPositionsRight,

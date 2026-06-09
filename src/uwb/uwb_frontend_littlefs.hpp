@@ -106,6 +106,8 @@ public:
         PARAM_DEF(UWBParams, enableCovMatrix),
         PARAM_DEF(UWBParams, rmseThreshold),
         PARAM_DEF(UWBParams, use2DEstimator),
+        PARAM_DEF(UWBParams, tdoaEstimatorMode),
+        PARAM_DEF(UWBParams, tdoaEstimatorDiag),
         PARAM_DEF(UWBParams, channel),
         PARAM_DEF(UWBParams, dwMode),
         PARAM_DEF(UWBParams, txPowerLevel),

@@ -13,6 +13,7 @@ struct MeasurementSlot {
     uint8_t anchor_a = 0;       // canonical (smaller) anchor id
     uint8_t anchor_b = 0;       // canonical (larger) anchor id
     bool fresh = false;         // true if updated since last consume
+    float sigma_m = 0.15f;      // nominal one-sigma TDoA error for weighting
 };
 
 struct MeasurementSnapshotResult {

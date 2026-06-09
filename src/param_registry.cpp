@@ -82,6 +82,8 @@ static constexpr RegistryEntry kEntries[] = {
     {"UWB_COV_EN", "uwb", "enableCovMatrix"},
     {"UWB_RMSE", "uwb", "rmseThreshold"},
     {"UWB_EST_2D", "uwb", "use2DEstimator"},
+    {"UWB_EST_MODE", "uwb", "tdoaEstimatorMode"},
+    {"UWB_EST_DIAG", "uwb", "tdoaEstimatorDiag"},
     {"UWB_CHAN", "uwb", "channel"},
     {"UWB_DW_MODE", "uwb", "dwMode"},
     {"UWB_TX_PWR", "uwb", "txPowerLevel"},
