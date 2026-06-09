@@ -111,9 +111,11 @@ static constexpr uint64_t kMax3DBatchSpanUs = 120000;
 static constexpr tdoa_estimator::Scalar kMin3DPlaneSeparationM = 0.5f;
 static constexpr tdoa_estimator::Scalar kMin3DAnchorAxisSeparationM = 0.5f;
 static constexpr tdoa_estimator::Scalar kMin3DGeometryHorizontalInformation = 0.25f;
-static constexpr tdoa_estimator::Scalar kMin3DGeometryZInformation = 0.05f;
+static constexpr tdoa_estimator::Scalar kMin3DGeometryZInformation = 0.25f;
 static constexpr tdoa_estimator::Scalar kMin3DGeometryDeterminantRatio = 3.0e-4f;
 static constexpr uint8_t kMin3DAxisSpanningPairs = 1;
+static constexpr uint8_t kMin3DCrossPlanePairs = 2;
+static constexpr uint8_t kMin3DSamePlanePairs = 1;
 static constexpr tdoa_estimator::Scalar kMax3DPositionVarianceM2 = 9.0f;
 static constexpr uint8_t kEstimatorModeLegacy = 0;
 static constexpr uint8_t kEstimatorModeRobust = 1;
@@ -1624,6 +1626,8 @@ struct EstimatorGeometryStats {
     uint8_t highPlaneAnchors = 0;
     uint8_t xSpanningPairs = 0;
     uint8_t ySpanningPairs = 0;
+    uint8_t crossPlanePairs = 0;
+    uint8_t samePlanePairs = 0;
     tdoa_estimator::Scalar xInformation = 0.0f;
     tdoa_estimator::Scalar yInformation = 0.0f;
     tdoa_estimator::Scalar zInformation = 0.0f;
@@ -1670,6 +1674,12 @@ static EstimatorGeometryStats evaluate3DGeometry(const PairSlot* rows,
         if (std::fabs(static_cast<tdoa_estimator::Scalar>(anchorParamsA.y - anchorParamsB.y))
             >= kMin3DAnchorAxisSeparationM) {
             stats.ySpanningPairs++;
+        }
+        if (std::fabs(static_cast<tdoa_estimator::Scalar>(anchorParamsA.z - anchorParamsB.z))
+            >= kMin3DPlaneSeparationM) {
+            stats.crossPlanePairs++;
+        } else {
+            stats.samePlanePairs++;
         }
 
         if (!anchorSeen[row.anchor_a]) {
@@ -1746,6 +1756,8 @@ static bool is3DGeometryAcceptable(const EstimatorGeometryStats& stats)
         && stats.highPlaneAnchors >= kMin3DPlaneAnchorsPerSide
         && stats.xSpanningPairs >= kMin3DAxisSpanningPairs
         && stats.ySpanningPairs >= kMin3DAxisSpanningPairs
+        && stats.crossPlanePairs >= kMin3DCrossPlanePairs
+        && stats.samePlanePairs >= kMin3DSamePlanePairs
         && stats.xInformation >= kMin3DGeometryHorizontalInformation
         && stats.yInformation >= kMin3DGeometryHorizontalInformation
         && stats.zInformation >= kMin3DGeometryZInformation
