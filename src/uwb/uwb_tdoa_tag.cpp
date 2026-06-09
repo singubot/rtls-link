@@ -120,9 +120,10 @@ static constexpr uint8_t kEstimatorSelectedDiagCapacity = 12;
 #ifdef TDOA_ESTIMATOR_JUMP_DIAG
 static constexpr uint8_t kEstimatorJumpEventCapacity = 8;
 static constexpr uint8_t kEstimatorJumpEventRowCapacity = 6;
-static constexpr tdoa_estimator::Scalar kEstimatorJumpDeltaM = 1.0f;
+static constexpr tdoa_estimator::Scalar kEstimatorJumpDeltaM = 0.6f;
 static constexpr tdoa_estimator::Scalar kEstimatorJumpVelocityMps = 8.0f;
 static constexpr tdoa_estimator::Scalar kEstimatorJumpAccelMps2 = 35.0f;
+static constexpr uint32_t kEstimatorJumpMinIntervalUs = 250000;
 static constexpr uint32_t kEstimatorJumpSlowSolveUs = 8000;
 static constexpr uint32_t kEstimatorJumpRmseMm = 300;
 static constexpr uint32_t kEstimatorJumpResidualScaleMm = 350;
@@ -1616,6 +1617,7 @@ static void maybeRecordEstimatorJumpEvent(const EstimatorSolveStats& solveStats,
                                           tdoa_estimator::Scalar previousSpeedMps,
                                           tdoa_estimator::Scalar& outCurrentSpeedMps)
 {
+    static uint64_t lastCaptureUs = 0;
     outCurrentSpeedMps = previousSpeedMps;
     if (previousTimeUs == 0) {
         return;
@@ -1666,14 +1668,16 @@ static void maybeRecordEstimatorJumpEvent(const EstimatorSolveStats& solveStats,
 
     const uint16_t captureFlags = flags & static_cast<uint16_t>(
         kEstimatorJumpFlagDelta
-        | kEstimatorJumpFlagVelocity
-        | kEstimatorJumpFlagAcceleration
         | kEstimatorJumpFlagSlowSolve
         | kEstimatorJumpFlagHighRmse
         | kEstimatorJumpFlagHighResidualScale);
     if (captureFlags == 0) {
         return;
     }
+    if (lastCaptureUs != 0 && nowUs > lastCaptureUs && (nowUs - lastCaptureUs) < kEstimatorJumpMinIntervalUs) {
+        return;
+    }
+    lastCaptureUs = nowUs;
 
     EstimatorJumpEventStats event;
     event.timestampMs = timerMs32();
