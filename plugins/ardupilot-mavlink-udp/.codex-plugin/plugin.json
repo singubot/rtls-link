@@ -1,0 +1,34 @@
+{
+  "name": "ardupilot-mavlink-udp",
+  "version": "0.1.0",
+  "description": "Run RTLS Link indoor drone checks over ArduPilot MAVLink UDP.",
+  "author": {
+    "name": "MarcEspuna",
+    "email": "mespuna@cactusiot.com",
+    "url": "https://github.com/mespunaiot"
+  },
+  "repository": "https://github.com/MarcEspuna/rtls-link",
+  "keywords": [
+    "ardupilot",
+    "mavlink",
+    "rtls-link",
+    "udp",
+    "hardware"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ArduPilot MAVLink UDP",
+    "shortDescription": "Check RTLS Link drone hardware through ArduPilot MAVLink over UDP.",
+    "longDescription": "Provides the repeatable local workflow for discovering RTLS Link tags, OTA flashing, checking MAVLink heartbeat/log availability, smoke-testing MAVFTP, collecting UART bridge diagnostics, downloading missions, and validating ArduPilot DataFlash logs.",
+    "developerName": "Mespuna IoT",
+    "category": "Development",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use ardupilot_mavlink_udp to work with the drone over MAVLink UDP: "
+    ],
+    "brandColor": "#0F766E"
+  }
+}
