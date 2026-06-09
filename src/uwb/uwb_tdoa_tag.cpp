@@ -109,8 +109,11 @@ static constexpr uint8_t kMin3DUniqueAnchorsForSolve = 6;
 static constexpr uint8_t kMin3DPlaneAnchorsPerSide = 2;
 static constexpr uint64_t kMax3DBatchSpanUs = 120000;
 static constexpr tdoa_estimator::Scalar kMin3DPlaneSeparationM = 0.5f;
+static constexpr tdoa_estimator::Scalar kMin3DAnchorAxisSeparationM = 0.5f;
+static constexpr tdoa_estimator::Scalar kMin3DGeometryHorizontalInformation = 0.25f;
 static constexpr tdoa_estimator::Scalar kMin3DGeometryZInformation = 0.05f;
 static constexpr tdoa_estimator::Scalar kMin3DGeometryDeterminantRatio = 3.0e-4f;
+static constexpr uint8_t kMin3DAxisSpanningPairs = 1;
 static constexpr tdoa_estimator::Scalar kMax3DPositionVarianceM2 = 9.0f;
 static constexpr uint8_t kEstimatorModeLegacy = 0;
 static constexpr uint8_t kEstimatorModeRobust = 1;
@@ -1619,6 +1622,10 @@ struct EstimatorGeometryStats {
     uint8_t uniqueAnchors = 0;
     uint8_t lowPlaneAnchors = 0;
     uint8_t highPlaneAnchors = 0;
+    uint8_t xSpanningPairs = 0;
+    uint8_t ySpanningPairs = 0;
+    tdoa_estimator::Scalar xInformation = 0.0f;
+    tdoa_estimator::Scalar yInformation = 0.0f;
     tdoa_estimator::Scalar zInformation = 0.0f;
     tdoa_estimator::Scalar determinantRatio = 0.0f;
 };
@@ -1654,21 +1661,32 @@ static EstimatorGeometryStats evaluate3DGeometry(const PairSlot* rows,
             continue;
         }
 
+        const UWBAnchorParam& anchorParamsA = anchors[row.anchor_a];
+        const UWBAnchorParam& anchorParamsB = anchors[row.anchor_b];
+        if (std::fabs(static_cast<tdoa_estimator::Scalar>(anchorParamsA.x - anchorParamsB.x))
+            >= kMin3DAnchorAxisSeparationM) {
+            stats.xSpanningPairs++;
+        }
+        if (std::fabs(static_cast<tdoa_estimator::Scalar>(anchorParamsA.y - anchorParamsB.y))
+            >= kMin3DAnchorAxisSeparationM) {
+            stats.ySpanningPairs++;
+        }
+
         if (!anchorSeen[row.anchor_a]) {
             anchorSeen[row.anchor_a] = true;
             stats.uniqueAnchors++;
-            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_a].z));
-            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_a].z));
+            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchorParamsA.z));
+            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchorParamsA.z));
         }
         if (!anchorSeen[row.anchor_b]) {
             anchorSeen[row.anchor_b] = true;
             stats.uniqueAnchors++;
-            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_b].z));
-            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchors[row.anchor_b].z));
+            minZ = std::min(minZ, static_cast<tdoa_estimator::Scalar>(anchorParamsB.z));
+            maxZ = std::max(maxZ, static_cast<tdoa_estimator::Scalar>(anchorParamsB.z));
         }
 
-        const tdoa_estimator::PosVector3D anchorA = anchorPositionVector(anchors[row.anchor_a]);
-        const tdoa_estimator::PosVector3D anchorB = anchorPositionVector(anchors[row.anchor_b]);
+        const tdoa_estimator::PosVector3D anchorA = anchorPositionVector(anchorParamsA);
+        const tdoa_estimator::PosVector3D anchorB = anchorPositionVector(anchorParamsB);
         tdoa_estimator::Scalar distanceA = (referencePosition - anchorA).norm();
         tdoa_estimator::Scalar distanceB = (referencePosition - anchorB).norm();
         if (distanceA < tdoa_estimator::Scalar(1.0e-4f)) {
@@ -1715,6 +1733,8 @@ static EstimatorGeometryStats evaluate3DGeometry(const PairSlot* rows,
             stats.determinantRatio = determinant / (trace * trace * trace);
         }
     }
+    stats.xInformation = information(0, 0);
+    stats.yInformation = information(1, 1);
     stats.zInformation = information(2, 2);
     return stats;
 }
@@ -1724,6 +1744,10 @@ static bool is3DGeometryAcceptable(const EstimatorGeometryStats& stats)
     return stats.uniqueAnchors >= kMin3DUniqueAnchorsForSolve
         && stats.lowPlaneAnchors >= kMin3DPlaneAnchorsPerSide
         && stats.highPlaneAnchors >= kMin3DPlaneAnchorsPerSide
+        && stats.xSpanningPairs >= kMin3DAxisSpanningPairs
+        && stats.ySpanningPairs >= kMin3DAxisSpanningPairs
+        && stats.xInformation >= kMin3DGeometryHorizontalInformation
+        && stats.yInformation >= kMin3DGeometryHorizontalInformation
         && stats.zInformation >= kMin3DGeometryZInformation
         && stats.determinantRatio >= kMin3DGeometryDeterminantRatio;
 }
