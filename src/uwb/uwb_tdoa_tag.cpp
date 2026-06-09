@@ -120,10 +120,12 @@ static constexpr uint8_t kEstimatorSelectedDiagCapacity = 12;
 #ifdef TDOA_ESTIMATOR_JUMP_DIAG
 static constexpr uint8_t kEstimatorJumpEventCapacity = 8;
 static constexpr uint8_t kEstimatorJumpEventRowCapacity = 6;
-static constexpr tdoa_estimator::Scalar kEstimatorJumpDeltaM = 0.6f;
+static constexpr tdoa_estimator::Scalar kEstimatorJumpDeltaM = 1.0f;
+static constexpr tdoa_estimator::Scalar kEstimatorJumpHorizontalDeltaM = 0.8f;
+static constexpr tdoa_estimator::Scalar kEstimatorJumpVerticalDeltaM = 0.7f;
 static constexpr tdoa_estimator::Scalar kEstimatorJumpVelocityMps = 8.0f;
 static constexpr tdoa_estimator::Scalar kEstimatorJumpAccelMps2 = 35.0f;
-static constexpr uint32_t kEstimatorJumpMinIntervalUs = 250000;
+static constexpr uint32_t kEstimatorJumpMinIntervalUs = 1000000;
 static constexpr uint32_t kEstimatorJumpSlowSolveUs = 8000;
 static constexpr uint32_t kEstimatorJumpRmseMm = 300;
 static constexpr uint32_t kEstimatorJumpResidualScaleMm = 350;
@@ -1644,7 +1646,9 @@ static void maybeRecordEstimatorJumpEvent(const EstimatorSolveStats& solveStats,
     outCurrentSpeedMps = speedMps;
 
     uint16_t flags = 0;
-    if (deltaNorm >= kEstimatorJumpDeltaM) {
+    if (deltaNorm >= kEstimatorJumpDeltaM
+        || horizontalDelta >= kEstimatorJumpHorizontalDeltaM
+        || std::fabs(delta(2)) >= kEstimatorJumpVerticalDeltaM) {
         flags |= kEstimatorJumpFlagDelta;
     }
     if (speedMps >= kEstimatorJumpVelocityMps) {
@@ -1669,8 +1673,7 @@ static void maybeRecordEstimatorJumpEvent(const EstimatorSolveStats& solveStats,
     const uint16_t captureFlags = flags & static_cast<uint16_t>(
         kEstimatorJumpFlagDelta
         | kEstimatorJumpFlagSlowSolve
-        | kEstimatorJumpFlagHighRmse
-        | kEstimatorJumpFlagHighResidualScale);
+        | kEstimatorJumpFlagHighRmse);
     if (captureFlags == 0) {
         return;
     }
