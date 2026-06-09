@@ -485,6 +485,7 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
         || commandStartsWith(command, "tdoa-anchor-model-status")
         || commandStartsWith(command, "tdoa-anchor-model-export")
         || commandStartsWith(command, "tdoa-estimator-status")
+        || commandStartsWith(command, "tdoa-estimator-events")
         || commandStartsWith(command, "tdoa-estimator-stats-reset");
 
     if (!knownBinaryCommand) {
@@ -707,6 +708,16 @@ bool CommandHandler::TryExecuteBinaryCommand(const char* command, CommandBinaryF
             appendAck(outFrame, rtls::protocol::StatusCode::InvalidMode, "Not in TAG_TDOA mode");
         } else {
             TDoAPositionEstimatorCommands::AppendBinaryStatus(outFrame);
+        }
+        xSemaphoreGive(commandQueueMutex);
+        return true;
+    }
+
+    if (commandStartsWith(command, "tdoa-estimator-events")) {
+        if (!IsTagTdoaMode()) {
+            appendAck(outFrame, rtls::protocol::StatusCode::InvalidMode, "Not in TAG_TDOA mode");
+        } else {
+            TDoAPositionEstimatorCommands::AppendBinaryEvents(outFrame);
         }
         xSemaphoreGive(commandQueueMutex);
         return true;

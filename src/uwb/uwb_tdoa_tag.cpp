@@ -117,6 +117,16 @@ static constexpr uint8_t kEstimatorDiagSummary = 1;
 static constexpr uint8_t kEstimatorDiagRows = 2;
 static constexpr uint8_t kEstimatorMaxSelectedRows = 20;
 static constexpr uint8_t kEstimatorSelectedDiagCapacity = 12;
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+static constexpr uint8_t kEstimatorJumpEventCapacity = 8;
+static constexpr uint8_t kEstimatorJumpEventRowCapacity = 6;
+static constexpr tdoa_estimator::Scalar kEstimatorJumpDeltaM = 1.0f;
+static constexpr tdoa_estimator::Scalar kEstimatorJumpVelocityMps = 8.0f;
+static constexpr tdoa_estimator::Scalar kEstimatorJumpAccelMps2 = 35.0f;
+static constexpr uint32_t kEstimatorJumpSlowSolveUs = 8000;
+static constexpr uint32_t kEstimatorJumpRmseMm = 300;
+static constexpr uint32_t kEstimatorJumpResidualScaleMm = 350;
+#endif
 
 enum EstimatorDiagnosticFlags : uint8_t {
     kEstimatorDiagFlagAccepted = 1u << 0,
@@ -128,6 +138,18 @@ enum EstimatorDiagnosticFlags : uint8_t {
     kEstimatorDiagFlagCovarianceInvalid = 1u << 6,
     kEstimatorDiagFlagRobustInvalid = 1u << 7,
 };
+
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+enum EstimatorJumpFlags : uint16_t {
+    kEstimatorJumpFlagDelta = 1u << 0,
+    kEstimatorJumpFlagVelocity = 1u << 1,
+    kEstimatorJumpFlagAcceleration = 1u << 2,
+    kEstimatorJumpFlagSlowSolve = 1u << 3,
+    kEstimatorJumpFlagHighRmse = 1u << 4,
+    kEstimatorJumpFlagHighResidualScale = 1u << 5,
+    kEstimatorJumpFlagLowRows = 1u << 6,
+};
+#endif
 
 static uint8_t sanitizeEstimatorMode(uint8_t mode)
 {
@@ -438,10 +460,42 @@ static TDoAAnchorModel s_anchorModel;
 struct EstimatorSelectedRowStats {
     uint8_t anchorA = 0;
     uint8_t anchorB = 0;
+    uint32_t ageUs = 0;
+    int32_t tdoaMm = 0;
     int32_t residualMm = 0;
     uint8_t baseWeightQ8 = 0;
     uint8_t finalWeightQ8 = 0;
 };
+
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+struct EstimatorJumpEventStats {
+    uint32_t sequence = 0;
+    uint32_t timestampMs = 0;
+    uint16_t jumpFlags = 0;
+    uint8_t mode = kEstimatorModeRobust;
+    uint8_t inputRows = 0;
+    uint8_t selectedRows = 0;
+    uint8_t uniqueAnchors = 0;
+    uint8_t iterations = 0;
+    uint8_t rowCount = 0;
+    uint32_t dtUs = 0;
+    uint32_t solveUs = 0;
+    uint32_t rmseMm = 0;
+    uint32_t residualScaleMm = 0;
+    uint32_t deltaMm = 0;
+    uint32_t horizontalDeltaMm = 0;
+    int32_t verticalDeltaMm = 0;
+    uint32_t speedMmps = 0;
+    uint32_t accelMmps2 = 0;
+    int32_t prevXMm = 0;
+    int32_t prevYMm = 0;
+    int32_t prevZMm = 0;
+    int32_t candidateXMm = 0;
+    int32_t candidateYMm = 0;
+    int32_t candidateZMm = 0;
+    EstimatorSelectedRowStats rows[kEstimatorJumpEventRowCapacity] = {};
+};
+#endif
 
 struct EstimatorSolveStats {
     uint8_t mode = kEstimatorModeRobust;
@@ -485,11 +539,18 @@ struct EstimatorStats {
     uint32_t compareFallbackLegacy = 0;
     uint32_t compareRobustInvalid = 0;
     EstimatorSolveStats lastSolve = {};
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+    uint32_t jumpEventsTotal = 0;
+    uint8_t jumpEventHead = 0;
+    uint8_t jumpEventCount = 0;
+    EstimatorJumpEventStats jumpEvents[kEstimatorJumpEventCapacity] = {};
+#endif
 };
 
 static EstimatorStats* s_estimatorStats = nullptr;
 static SemaphoreHandle_t estimator_stats_mtx = nullptr;
 static std::atomic<uint32_t> s_estimatorProducerDroppedTotal{0};
+static bool copyEstimatorStats(EstimatorStats& outStats);
 
 static tdoaEngineMatchingAlgorithm_t matcherPolicyFromParam(uint8_t policy)
 {
@@ -578,6 +639,109 @@ static void recordEstimatorSolveStats(const EstimatorSolveStats& solveStats)
 
     xSemaphoreGive(estimator_stats_mtx);
 }
+
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+static void recordEstimatorJumpEvent(const EstimatorJumpEventStats& event)
+{
+    ensureEstimatorStatsMutex();
+    if (s_estimatorStats == nullptr || estimator_stats_mtx == nullptr || xSemaphoreTake(estimator_stats_mtx, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return;
+    }
+
+    EstimatorJumpEventStats next = event;
+    next.sequence = ++s_estimatorStats->jumpEventsTotal;
+    s_estimatorStats->jumpEvents[s_estimatorStats->jumpEventHead] = next;
+    s_estimatorStats->jumpEventHead =
+        static_cast<uint8_t>((s_estimatorStats->jumpEventHead + 1) % kEstimatorJumpEventCapacity);
+    if (s_estimatorStats->jumpEventCount < kEstimatorJumpEventCapacity) {
+        s_estimatorStats->jumpEventCount++;
+    }
+
+    xSemaphoreGive(estimator_stats_mtx);
+}
+
+static uint8_t eventIndexFromOldest(const EstimatorStats& stats, uint8_t offset)
+{
+    const uint8_t oldest = stats.jumpEventCount < kEstimatorJumpEventCapacity
+        ? 0
+        : stats.jumpEventHead;
+    return static_cast<uint8_t>((oldest + offset) % kEstimatorJumpEventCapacity);
+}
+
+static uint32_t timerMs32()
+{
+    const uint64_t ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000u;
+    return ms > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(ms);
+}
+
+static void appendEstimatorJumpEvents(rtls::protocol::BinaryFrameBuilder<2048>& outFrame)
+{
+    EstimatorStats stats;
+    if (!copyEstimatorStats(stats)) {
+        outFrame.Begin(rtls::protocol::FrameType::TdoaPositionEstimatorEvents,
+                       rtls::protocol::StatusCode::Error);
+        outFrame.AppendString("estimator stats unavailable");
+        outFrame.Finish();
+        return;
+    }
+
+    outFrame.Begin(rtls::protocol::FrameType::TdoaPositionEstimatorEvents);
+    outFrame.AppendU8(1); // payload version
+    outFrame.AppendU8(kEstimatorJumpEventCapacity);
+    outFrame.AppendU8(kEstimatorJumpEventRowCapacity);
+    outFrame.AppendU8(stats.jumpEventCount);
+    outFrame.AppendU32(stats.jumpEventsTotal);
+
+    for (uint8_t i = 0; i < stats.jumpEventCount; i++) {
+        const EstimatorJumpEventStats& event = stats.jumpEvents[eventIndexFromOldest(stats, i)];
+        outFrame.AppendU32(event.sequence);
+        outFrame.AppendU32(event.timestampMs);
+        outFrame.AppendU16(event.jumpFlags);
+        outFrame.AppendU8(event.mode);
+        outFrame.AppendU8(event.inputRows);
+        outFrame.AppendU8(event.selectedRows);
+        outFrame.AppendU8(event.uniqueAnchors);
+        outFrame.AppendU8(event.iterations);
+        outFrame.AppendU8(event.rowCount);
+        outFrame.AppendU32(event.dtUs);
+        outFrame.AppendU32(event.solveUs);
+        outFrame.AppendU32(event.rmseMm);
+        outFrame.AppendU32(event.residualScaleMm);
+        outFrame.AppendU32(event.deltaMm);
+        outFrame.AppendU32(event.horizontalDeltaMm);
+        outFrame.AppendI32(event.verticalDeltaMm);
+        outFrame.AppendU32(event.speedMmps);
+        outFrame.AppendU32(event.accelMmps2);
+        outFrame.AppendI32(event.prevXMm);
+        outFrame.AppendI32(event.prevYMm);
+        outFrame.AppendI32(event.prevZMm);
+        outFrame.AppendI32(event.candidateXMm);
+        outFrame.AppendI32(event.candidateYMm);
+        outFrame.AppendI32(event.candidateZMm);
+        const uint8_t rowCount = std::min<uint8_t>(event.rowCount, kEstimatorJumpEventRowCapacity);
+        for (uint8_t row = 0; row < rowCount; row++) {
+            const EstimatorSelectedRowStats& src = event.rows[row];
+            outFrame.AppendU8(src.anchorA);
+            outFrame.AppendU8(src.anchorB);
+            outFrame.AppendU32(src.ageUs);
+            outFrame.AppendI32(src.tdoaMm);
+            outFrame.AppendI32(src.residualMm);
+            outFrame.AppendU8(src.baseWeightQ8);
+            outFrame.AppendU8(src.finalWeightQ8);
+        }
+    }
+
+    outFrame.Finish();
+}
+#else
+static void appendEstimatorJumpEvents(rtls::protocol::BinaryFrameBuilder<2048>& outFrame)
+{
+    outFrame.Begin(rtls::protocol::FrameType::TdoaPositionEstimatorEvents,
+                   rtls::protocol::StatusCode::Error);
+    outFrame.AppendString("TDoA estimator jump diagnostics disabled");
+    outFrame.Finish();
+}
+#endif
 
 static void recordMeasurementCountLocked(size_t measurementCount)
 {
@@ -769,8 +933,11 @@ static void appendPositionEstimatorStatus(rtls::protocol::BinaryFrameBuilder<204
     outFrame.AppendU32(solve.legacyRmseMm);
     outFrame.AppendU32(solve.robustRmseMm);
     outFrame.AppendU32(solve.compareDeltaMm);
-    outFrame.AppendU8(solve.selectedDiagCount);
-    for (uint8_t i = 0; i < solve.selectedDiagCount; i++) {
+    const uint8_t statusDiagCount = solve.diagLevel >= kEstimatorDiagRows
+        ? solve.selectedDiagCount
+        : 0;
+    outFrame.AppendU8(statusDiagCount);
+    for (uint8_t i = 0; i < statusDiagCount; i++) {
         const EstimatorSelectedRowStats& row = solve.selected[i];
         outFrame.AppendU8(row.anchorA);
         outFrame.AppendU8(row.anchorB);
@@ -1394,6 +1561,11 @@ void AppendBinaryStatus(rtls::protocol::BinaryFrameBuilder<2048>& outFrame)
     appendPositionEstimatorStatus(outFrame);
 }
 
+void AppendBinaryEvents(rtls::protocol::BinaryFrameBuilder<2048>& outFrame)
+{
+    appendEstimatorJumpEvents(outFrame);
+}
+
 void ResetStats()
 {
     resetEstimatorStats();
@@ -1436,6 +1608,104 @@ static uint32_t positionDeltaMm(const tdoa_estimator::PosVector3D& a,
     return metersToMillimetersUnsigned((a - b).norm());
 }
 
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+static void maybeRecordEstimatorJumpEvent(const EstimatorSolveStats& solveStats,
+                                          const tdoa_estimator::PosVector3D& previousPosition,
+                                          const tdoa_estimator::PosVector3D& candidatePosition,
+                                          uint64_t previousTimeUs,
+                                          tdoa_estimator::Scalar previousSpeedMps,
+                                          tdoa_estimator::Scalar& outCurrentSpeedMps)
+{
+    outCurrentSpeedMps = previousSpeedMps;
+    if (previousTimeUs == 0) {
+        return;
+    }
+
+    const uint64_t nowUs = static_cast<uint64_t>(esp_timer_get_time());
+    const uint64_t dtUs64 = nowUs > previousTimeUs ? nowUs - previousTimeUs : 0;
+    if (dtUs64 == 0) {
+        return;
+    }
+
+    const tdoa_estimator::PosVector3D delta = candidatePosition - previousPosition;
+    const tdoa_estimator::Scalar deltaNorm = delta.norm();
+    const tdoa_estimator::Scalar horizontalDelta =
+        std::sqrt((delta(0) * delta(0)) + (delta(1) * delta(1)));
+    const tdoa_estimator::Scalar dtSeconds =
+        static_cast<tdoa_estimator::Scalar>(dtUs64) / static_cast<tdoa_estimator::Scalar>(1000000);
+    const tdoa_estimator::Scalar speedMps = dtSeconds > tdoa_estimator::Scalar(0)
+        ? deltaNorm / dtSeconds
+        : tdoa_estimator::Scalar(0);
+    const tdoa_estimator::Scalar accelMps2 = dtSeconds > tdoa_estimator::Scalar(0)
+        ? std::fabs(speedMps - previousSpeedMps) / dtSeconds
+        : tdoa_estimator::Scalar(0);
+    outCurrentSpeedMps = speedMps;
+
+    uint16_t flags = 0;
+    if (deltaNorm >= kEstimatorJumpDeltaM) {
+        flags |= kEstimatorJumpFlagDelta;
+    }
+    if (speedMps >= kEstimatorJumpVelocityMps) {
+        flags |= kEstimatorJumpFlagVelocity;
+    }
+    if (accelMps2 >= kEstimatorJumpAccelMps2) {
+        flags |= kEstimatorJumpFlagAcceleration;
+    }
+    if (solveStats.solveUs >= kEstimatorJumpSlowSolveUs) {
+        flags |= kEstimatorJumpFlagSlowSolve;
+    }
+    if (solveStats.rmseMm >= kEstimatorJumpRmseMm) {
+        flags |= kEstimatorJumpFlagHighRmse;
+    }
+    if (solveStats.residualScaleMm >= kEstimatorJumpResidualScaleMm) {
+        flags |= kEstimatorJumpFlagHighResidualScale;
+    }
+    if (solveStats.selectedRows <= kMin3DMeasurementsForSolve) {
+        flags |= kEstimatorJumpFlagLowRows;
+    }
+
+    const uint16_t captureFlags = flags & static_cast<uint16_t>(
+        kEstimatorJumpFlagDelta
+        | kEstimatorJumpFlagVelocity
+        | kEstimatorJumpFlagAcceleration
+        | kEstimatorJumpFlagSlowSolve
+        | kEstimatorJumpFlagHighRmse
+        | kEstimatorJumpFlagHighResidualScale);
+    if (captureFlags == 0) {
+        return;
+    }
+
+    EstimatorJumpEventStats event;
+    event.timestampMs = timerMs32();
+    event.jumpFlags = flags;
+    event.mode = solveStats.mode;
+    event.inputRows = solveStats.inputRows;
+    event.selectedRows = solveStats.selectedRows;
+    event.uniqueAnchors = solveStats.uniqueAnchors;
+    event.iterations = solveStats.iterations;
+    event.rowCount = std::min<uint8_t>(solveStats.selectedDiagCount, kEstimatorJumpEventRowCapacity);
+    event.dtUs = dtUs64 > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(dtUs64);
+    event.solveUs = solveStats.solveUs;
+    event.rmseMm = solveStats.rmseMm;
+    event.residualScaleMm = solveStats.residualScaleMm;
+    event.deltaMm = metersToMillimetersUnsigned(deltaNorm);
+    event.horizontalDeltaMm = metersToMillimetersUnsigned(horizontalDelta);
+    event.verticalDeltaMm = metersToMillimetersSigned(static_cast<float>(delta(2)));
+    event.speedMmps = metersToMillimetersUnsigned(speedMps);
+    event.accelMmps2 = metersToMillimetersUnsigned(accelMps2);
+    event.prevXMm = metersToMillimetersSigned(static_cast<float>(previousPosition(0)));
+    event.prevYMm = metersToMillimetersSigned(static_cast<float>(previousPosition(1)));
+    event.prevZMm = metersToMillimetersSigned(static_cast<float>(previousPosition(2)));
+    event.candidateXMm = metersToMillimetersSigned(static_cast<float>(candidatePosition(0)));
+    event.candidateYMm = metersToMillimetersSigned(static_cast<float>(candidatePosition(1)));
+    event.candidateZMm = metersToMillimetersSigned(static_cast<float>(candidatePosition(2)));
+    for (uint8_t i = 0; i < event.rowCount; i++) {
+        event.rows[i] = solveStats.selected[i];
+    }
+    recordEstimatorJumpEvent(event);
+}
+#endif
+
 static void copyRobustDiagnostics(EstimatorSolveStats& outStats,
                                   const tdoa_estimator::RobustEstimatorResult& result,
                                   const tdoa_estimator::RobustTdoaRow* rows)
@@ -1450,11 +1720,21 @@ static void copyRobustDiagnostics(EstimatorSolveStats& outStats,
     if (result.pair_selection_used) {
         outStats.flags |= kEstimatorDiagFlagPairSelection;
     }
-    if (outStats.diagLevel < kEstimatorDiagRows || rows == nullptr) {
+    if (rows == nullptr) {
         return;
     }
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+    const uint8_t diagCapacity = outStats.diagLevel >= kEstimatorDiagRows
+        ? kEstimatorSelectedDiagCapacity
+        : kEstimatorJumpEventRowCapacity;
+#else
+    if (outStats.diagLevel < kEstimatorDiagRows) {
+        return;
+    }
+    const uint8_t diagCapacity = kEstimatorSelectedDiagCapacity;
+#endif
 
-    const uint8_t diagCount = std::min<uint8_t>(result.selected_rows, kEstimatorSelectedDiagCapacity);
+    const uint8_t diagCount = std::min<uint8_t>(result.selected_rows, diagCapacity);
     outStats.selectedDiagCount = diagCount;
     for (uint8_t i = 0; i < diagCount; i++) {
         const uint8_t sourceIndex = result.selected_indices[i];
@@ -1462,6 +1742,9 @@ static void copyRobustDiagnostics(EstimatorSolveStats& outStats,
         EstimatorSelectedRowStats& dst = outStats.selected[i];
         dst.anchorA = row.anchor_a;
         dst.anchorB = row.anchor_b;
+        dst.ageUs = row.age_us;
+        dst.tdoaMm = rtls::protocol::MetersToMillimeters(
+            static_cast<float>(row.tdoa));
         dst.residualMm = rtls::protocol::MetersToMillimeters(
             static_cast<float>(result.residuals[sourceIndex]));
         dst.baseWeightQ8 = weightToQ8(result.base_weights[sourceIndex]);
@@ -1478,6 +1761,10 @@ static void estimatorProcess() {
     static bool first_estimation = true;
     static bool last_use_2d = true;
     static uint8_t last_3d_estimator_mode = kEstimatorModeRobust;
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+    static uint64_t last_position_time_us = 0;
+    static tdoa_estimator::Scalar last_speed_mps = 0.0f;
+#endif
     static constexpr tdoa_estimator::Scalar ASSUMED_TAG_Z = 0.0f;
     static constexpr int NUM_ITERATIONS_2D = 5;
     static constexpr int NUM_ITERATIONS_3D = 10;
@@ -1633,6 +1920,10 @@ static void estimatorProcess() {
                 last_position(2) = ASSUMED_TAG_Z;
             }
             first_estimation = false;
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+            last_position_time_us = 0;
+            last_speed_mps = 0.0f;
+#endif
             const char* anchor_source = "configured";
 #ifdef USE_DYNAMIC_ANCHOR_POSITIONS
             if (UWBTagTDoA::IsDynamicPositioningEnabled()) {
@@ -1868,6 +2159,15 @@ static void estimatorProcess() {
         solveStats.zMm = metersToMillimetersSigned(static_cast<float>(current_estimate_3d(2)));
         recordEstimatorSolveStats(solveStats);
         if (is_valid_estimate && !has_nan) { // Only send if the estimate is valid
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+            tdoa_estimator::Scalar current_speed_mps = last_speed_mps;
+            maybeRecordEstimatorJumpEvent(solveStats,
+                                          last_position,
+                                          current_estimate_3d,
+                                          last_position_time_us,
+                                          last_speed_mps,
+                                          current_speed_mps);
+#endif
             recordEstimatorAccepted(current_estimate_3d(0),
                                     current_estimate_3d(1),
                                     current_estimate_3d(2),
@@ -1877,6 +2177,10 @@ static void estimatorProcess() {
 
             // Update the persistent state for the next iteration (Warm Start)
             last_position = current_estimate_3d;
+#ifdef TDOA_ESTIMATOR_JUMP_DIAG
+            last_position_time_us = static_cast<uint64_t>(esp_timer_get_time());
+            last_speed_mps = current_speed_mps;
+#endif
 
 #if TDOA_STATS_LOGGING == ENABLE
             stats_samples_sent++;
